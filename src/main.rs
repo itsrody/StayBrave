@@ -1,16 +1,10 @@
-mod analyzer;
-mod config;
-mod fetcher;
-mod optimizer;
-mod writer;
-
-use crate::analyzer::Analyzer;
-use crate::config::Config;
-use crate::fetcher::Fetcher;
-use crate::optimizer::optimize;
-use crate::writer::{ListSummary, write_output};
 use clap::Parser;
 use std::path::PathBuf;
+use staybrave::analyzer::Analyzer;
+use staybrave::config::Config;
+use staybrave::fetcher::Fetcher;
+use staybrave::optimizer::optimize;
+use staybrave::writer::{ListSummary, write_output};
 
 #[derive(Parser, Debug)]
 #[command(
