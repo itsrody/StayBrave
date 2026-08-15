@@ -1,0 +1,26 @@
+[package]
+name = "staybrave"
+version = "0.1.0"
+edition = "2021"
+description = "Fetch, analyze, and optimize adblock-rust filter lists into a single sorted StayBrave.txt"
+license = "MPL-2.0"
+
+[dependencies]
+adblock = "0.13"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+rayon = "1"
+reqwest = { version = "0.12", default-features = true, features = ["brotli", "deflate", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+time = { version = "0.3", features = ["formatting"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

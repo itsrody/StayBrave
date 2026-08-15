@@ -1,0 +1,47 @@
+[fetch]
+concurrency = 16
+timeout_secs = 30
+retries = 2
+retry_delay_ms = 500
+max_redirects = 5
+expand_includes = true
+max_include_depth = 4
+user_agent = "StayBrave/0.1 (filter-list optimizer; https://github.com/itsrody/StayBrave)"
+
+[output]
+file = "StayBrave.txt"
+
+[[lists]]
+name = "EasyList"
+url = "https://easylist.to/easylist/easylist.txt"
+enabled = true
+
+[[lists]]
+name = "EasyPrivacy"
+url = "https://easylist.to/easylist/easyprivacy.txt"
+enabled = true
+
+[[lists]]
+name = "Peter Lowe"
+url = "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblockplus&showintro=1&mimetype=plaintext"
+enabled = true
+
+[[lists]]
+name = "uBlock filters"
+url = "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/filters.txt"
+enabled = true
+
+[[lists]]
+name = "uBlock privacy"
+url = "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/privacy.txt"
+enabled = true
+
+[[lists]]
+name = "uBlock annoyances"
+url = "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/annoyances.txt"
+enabled = false
+
+[[lists]]
+name = "AdGuard Base"
+url = "https://filters.adtidy.org/extension/ublock/filters/2.txt"
+enabled = true
