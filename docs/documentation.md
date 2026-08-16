@@ -60,7 +60,7 @@ The binary is produced at `target/release/staybrave`.
 ## Usage
 
 ```sh
-./target/release/staybrave                     # uses lists.toml, writes StayBrave.txt
+./target/release/staybrave                     # uses lists.toml, writes output/StayBrave.txt
 ./target/release/staybrave --config lists.toml # explicit config path
 ./target/release/staybrave -o out.txt          # override output path
 ./target/release/staybrave --help
@@ -69,7 +69,7 @@ The binary is produced at `target/release/staybrave`.
 | Flag | Default | Description |
 | --- | --- | --- |
 | `-c, --config` | `lists.toml` | Path to the TOML config describing the lists to fetch. |
-| `-o, --output` | `StayBrave.txt` (from config) | Output file path. |
+| `-o, --output` | `output/StayBrave.txt` (from config) | Output file path. |
 
 Log level can be tuned with `RUST_LOG` (e.g. `RUST_LOG=debug ./target/release/staybrave`).
 
@@ -89,7 +89,7 @@ max_include_depth = 4     # recursion limit for nested includes
 user_agent = "StayBrave/0.1 (filter-list optimizer)"
 
 [output]
-file = "StayBrave.txt"
+file = "output/StayBrave.txt"
 
 [filter]                          # optional; defaults match Brave's supported set
 scriptlets = true                 # strip uBO +js()/script:inject rules

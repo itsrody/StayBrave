@@ -9,7 +9,7 @@ max_include_depth = 4
 user_agent = "StayBrave/0.1 (filter-list optimizer; https://github.com/itsrody/StayBrave)"
 
 [output]
-file = "StayBrave.txt"
+file = "output/StayBrave.txt"
 
 # Rules referencing functionality Brave's engine cannot execute are dropped.
 # The defaults below match the resources adblock-rust/Brave ships. Redirect
