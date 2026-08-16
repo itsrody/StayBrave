@@ -1,0 +1,57 @@
+name: Build and release StayBrave.txt
+
+on:
+  schedule:
+    # Runs at midnight UTC every 3rd day of the month (~every 72h).
+    - cron: "0 0 */3 * *"
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Generate and publish StayBrave.txt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build staybrave
+        run: cargo build --release
+
+      - name: Generate StayBrave.txt
+        run: ./target/release/staybrave --config lists.toml --output StayBrave.txt
+
+      - name: Smoke-test output
+        run: |
+          test -s StayBrave.txt
+          head -1 StayBrave.txt | grep -q "StayBrave" || { echo "unexpected output header"; exit 1; }
+          echo "output OK: $(wc -l < StayBrave.txt) lines"
+
+      - name: Compute release tag
+        id: tag
+        run: echo "value=v$(date -u +'%Y%m%d-%H%M%S')" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.value }}
+          name: StayBrave ${{ steps.tag.outputs.value }}
+          body: |
+            Automated release of the generated, optimized filter list.
+
+            - Sources: as configured in [lists.toml](./lists.toml)
+            - Triggered: scheduled (every ~72h) or manual
+          files: StayBrave.txt
+          fail_on_unmatched_files: true
