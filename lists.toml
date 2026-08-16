@@ -12,18 +12,18 @@ user_agent = "StayBrave/0.1 (filter-list optimizer; https://github.com/itsrody/S
 file = "StayBrave.txt"
 
 # Rules referencing functionality Brave's engine cannot execute are dropped.
-# The defaults below match the resources adblock-rust/Brave ships.
+# The defaults below match the resources adblock-rust/Brave ships. Redirect
+# resource values are canonicalized (uBO aliases, `abp-resource:` prefix) by
+# the normalizer before this allowlist is consulted.
 [filter]
 scriptlets = true
 redirect_allowlist = [
   "1x1.gif", "2x2.png", "3x2.png", "32x32.png",
-  "noop.js", "noopjs",
-  "noop.txt", "nooptext",
-  "noop.html", "noopframe",
-  "noop.css",
-  "noop-1s.mp4", "noopmp4-1s",
-  "noop-2s.mp4", "noopmp4-2s",
-  "noop-0.1s.mp3", "noopmp3-0.1s",
+  "empty",
+  "noop.js", "noop.txt", "noop.html", "noop.css", "noop.json",
+  "noop-1s.mp4", "noop-2s.mp4", "noop-3s.mp4",
+  "noop-0.1s.mp3", "noop-0.5s.mp3",
+  "noop-vast2.xml", "noop-vast3.xml", "noop-vast4.xml", "noop-vmap1.xml",
   "google-analytics_analytics.js",
   "googletagmanager_gtm.js",
   "googlesyndication_adsbygoogle.js",
@@ -60,9 +60,70 @@ enabled = true
 [[lists]]
 name = "uBlock annoyances"
 url = "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/annoyances.txt"
-enabled = false
+enabled = true
+
+[[lists]]
+name = "uBlock quick fixes"
+url = "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/quick-fixes.txt"
+enabled = true
+
+[[lists]]
+name = "uBlock badware risks"
+url = "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/badware.txt"
+enabled = true
 
 [[lists]]
 name = "AdGuard Base"
 url = "https://filters.adtidy.org/extension/ublock/filters/2.txt"
 enabled = true
+
+[[lists]]
+name = "AdGuard Tracking Protection"
+url = "https://filters.adtidy.org/extension/ublock/filters/3.txt"
+enabled = true
+
+[[lists]]
+name = "AdGuard Social Media"
+url = "https://filters.adtidy.org/extension/ublock/filters/4.txt"
+enabled = true
+
+[[lists]]
+name = "AdGuard Mobile Ads"
+url = "https://filters.adtidy.org/extension/ublock/filters/11.txt"
+enabled = true
+
+[[lists]]
+name = "AdGuard Annoyances"
+url = "https://filters.adtidy.org/extension/ublock/filters/14.txt"
+enabled = true
+
+[[lists]]
+name = "AdGuard URL Tracking"
+url = "https://filters.adtidy.org/extension/ublock/filters/17.txt"
+enabled = true
+
+[[lists]]
+name = "ABP Anti-circumvention"
+url = "https://easylist-downloads.adblockplus.org/abp-filters-anti-cv.txt"
+enabled = true
+
+[[lists]]
+name = "Fanboy's Social"
+url = "https://easylist.to/easylist/fanboy-social.txt"
+enabled = true
+
+[[lists]]
+name = "Fanboy's Annoyances"
+url = "https://secure.fanboy.co.nz/fanboy-annoyance.txt"
+enabled = true
+
+[[lists]]
+name = "Fanboy's Cookiemonster"
+url = "https://secure.fanboy.co.nz/fanboy-cookiemonster.txt"
+enabled = true
+
+[[lists]]
+name = "StevenBlack hosts"
+url = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+enabled = true
+hosts = true

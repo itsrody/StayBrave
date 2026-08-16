@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
         match &r.result {
             Ok(fetched) => {
                 sources_ok += 1;
-                let (rules, stats) = analyzer.analyze(fetched, &filterer);
+                let (rules, stats) = analyzer.analyze(fetched, &filterer, r.source.hosts);
                 all_rules.extend(rules);
                 tracing::info!(
                     list = %r.source.name,
@@ -68,6 +68,9 @@ async fn main() -> anyhow::Result<()> {
                     invalid = stats.invalid,
                     scriptlets_removed = stats.scriptlets_removed,
                     redirects_removed = stats.redirects_removed,
+                    hosts_converted = stats.hosts_converted,
+                    unsupported_options = stats.unsupported_options,
+                    unsupported_cosmetic = stats.unsupported_cosmetic,
                     "analyzed"
                 );
                 summaries.push(ListSummary {
@@ -83,6 +86,9 @@ async fn main() -> anyhow::Result<()> {
                     invalid: stats.invalid,
                     scriptlets_removed: stats.scriptlets_removed,
                     redirects_removed: stats.redirects_removed,
+                    hosts_converted: stats.hosts_converted,
+                    unsupported_options: stats.unsupported_options,
+                    unsupported_cosmetic: stats.unsupported_cosmetic,
                 });
             }
             Err(e) => {
@@ -101,6 +107,9 @@ async fn main() -> anyhow::Result<()> {
                     invalid: 0,
                     scriptlets_removed: 0,
                     redirects_removed: 0,
+                    hosts_converted: 0,
+                    unsupported_options: 0,
+                    unsupported_cosmetic: 0,
                 });
             }
         }
@@ -109,6 +118,9 @@ async fn main() -> anyhow::Result<()> {
     let optimized = optimize(all_rules);
     let scriptlets_removed: u64 = summaries.iter().map(|s| s.scriptlets_removed).sum();
     let redirects_removed: u64 = summaries.iter().map(|s| s.redirects_removed).sum();
+    let hosts_converted: u64 = summaries.iter().map(|s| s.hosts_converted).sum();
+    let unsupported_options: u64 = summaries.iter().map(|s| s.unsupported_options).sum();
+    let unsupported_cosmetic: u64 = summaries.iter().map(|s| s.unsupported_cosmetic).sum();
     tracing::info!(
         sources_fetched = sources_ok,
         sources_failed,
@@ -118,6 +130,9 @@ async fn main() -> anyhow::Result<()> {
         duplicates_removed = optimized.duplicates_removed,
         scriptlets_removed,
         redirects_removed,
+        hosts_converted,
+        unsupported_options,
+        unsupported_cosmetic,
         "optimization complete"
     );
 

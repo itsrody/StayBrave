@@ -74,9 +74,10 @@ pub struct FilterConfig {
     /// execute them, so in a browser they are dead rules.
     #[serde(default = "default_scriptlets_enabled")]
     pub scriptlets: bool,
-    /// `$redirect`/`$redirect-rule` resources that staybrave considers
-    /// supported. Rules referencing any other resource are dropped. Aliases
-    /// (`noopjs`, `nooptext`, ...) are included alongside their canonical names.
+    /// `$redirect`/`$redirect-rule`/`$rewrite` resources that staybrave
+    /// considers supported. Rules referencing any other resource are dropped.
+    /// Values must be canonical resource names; aliases are resolved to
+    /// canonical names by the normalizer before they reach this list.
     #[serde(default = "default_redirect_allowlist")]
     pub redirect_allowlist: Vec<String>,
 }
@@ -97,6 +98,10 @@ pub struct ListSource {
     pub url: String,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Treat the list as hosts-file syntax: every `#`/`!` comment is dropped
+    /// and IP-led / bare-domain lines are converted to `||domain^` rules.
+    #[serde(default)]
+    pub hosts: bool,
 }
 
 fn default_concurrency() -> usize {
@@ -139,18 +144,17 @@ fn default_scriptlets_enabled() -> bool {
     true
 }
 
-/// Canonical adblock-rust resources plus their uBO aliases, matching the set
-/// Brave's engine ships.
+/// Canonical adblock-rust resource names (drawn from uBO's redirect-resources)
+/// that match the set Brave's engine ships. Aliases such as `noopjs` are
+/// canonicalized by the normalizer before the allowlist is consulted.
 fn default_redirect_allowlist() -> Vec<String> {
     [
         "1x1.gif", "2x2.png", "3x2.png", "32x32.png",
-        "noop.js", "noopjs",
-        "noop.txt", "nooptext",
-        "noop.html", "noopframe",
-        "noop.css",
-        "noop-1s.mp4", "noopmp4-1s",
-        "noop-2s.mp4", "noopmp4-2s",
-        "noop-0.1s.mp3", "noopmp3-0.1s",
+        "empty",
+        "noop.js", "noop.txt", "noop.html", "noop.css", "noop.json",
+        "noop-1s.mp4", "noop-2s.mp4", "noop-3s.mp4",
+        "noop-0.1s.mp3", "noop-0.5s.mp3",
+        "noop-vast2.xml", "noop-vast3.xml", "noop-vast4.xml", "noop-vmap1.xml",
         "google-analytics_analytics.js",
         "googletagmanager_gtm.js",
         "googlesyndication_adsbygoogle.js",

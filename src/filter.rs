@@ -1,4 +1,5 @@
 use crate::config::FilterConfig;
+use crate::normalizer::canonical_resource;
 use adblock::filters::cosmetic::{CosmeticFilter, CosmeticFilterMask, CosmeticFilterOperator};
 use adblock::filters::network::{NetworkFilter, NetworkFilterFeaturesMask};
 use std::collections::HashSet;
@@ -32,15 +33,17 @@ impl Filterer {
         )
     }
 
-    /// True for `$redirect`/`$redirect-rule` rules whose resource is not in the
-    /// supported set. Such rules can never resolve to an actual redirect, so
-    /// they are dead weight.
+    /// True for `$redirect`/`$redirect-rule`/`$rewrite` rules whose resource is
+    /// not in the supported set. Such rules can never resolve to an actual
+    /// redirect, so they are dead weight. The resource value is canonicalized
+    /// (ABP `abp-resource:` prefix stripped, uBO aliases resolved) so the
+    /// allowlist only needs canonical names.
     pub fn is_unsupported_redirect(&self, f: &NetworkFilter) -> bool {
         if !f.features_mask.contains(NetworkFilterFeaturesMask::IS_REDIRECT) {
             return false;
         }
         match f.modifier_option {
-            Some(resource) => !self.redirect_allowlist.contains(resource),
+            Some(resource) => !self.redirect_allowlist.contains(canonical_resource(resource)),
             None => true,
         }
     }
@@ -105,8 +108,11 @@ mod tests {
         for line in [
             "||example.com^$redirect=noop.js",
             "||example.com^$redirect=noopjs",
+            "||example.com^$redirect=empty",
             "||example.com^$redirect-rule=1x1.gif",
             "||example.com^$redirect=googlesyndication_adsbygoogle.js",
+            "||example.com^$redirect=abp-resource:blank-mp4",
+            "||example.com^$rewrite=abp-resource:blank-mp4",
         ] {
             let ParsedLine::Network(nf) = parse(line) else {
                 panic!("{line} not network");

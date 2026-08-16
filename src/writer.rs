@@ -19,6 +19,9 @@ pub struct ListSummary {
     pub invalid: u64,
     pub scriptlets_removed: u64,
     pub redirects_removed: u64,
+    pub hosts_converted: u64,
+    pub unsupported_options: u64,
+    pub unsupported_cosmetic: u64,
 }
 
 pub fn write_output(
@@ -50,7 +53,7 @@ pub fn write_output(
         if s.ok {
             writeln!(
                 w,
-                "!   [ok]   {}: {} bytes (+{} included files), {} lines, {} network + {} cosmetic rules, {} empty, {} unsupported, {} invalid, {} scriptlets + {} redirects filtered",
+                "!   [ok]   {}: {} bytes (+{} included files), {} lines, {} network + {} cosmetic rules, {} empty, {} unsupported, {} invalid, {} hosts entries converted, {} scriptlets + {} redirects filtered, {} unsupported options, {} unsupported cosmetic rules",
                 s.name,
                 s.bytes.unwrap_or(0),
                 s.included_files,
@@ -60,8 +63,11 @@ pub fn write_output(
                 s.empty,
                 s.unsupported,
                 s.invalid,
+                s.hosts_converted,
                 s.scriptlets_removed,
-                s.redirects_removed
+                s.redirects_removed,
+                s.unsupported_options,
+                s.unsupported_cosmetic
             )?;
         } else {
             writeln!(w, "!   [fail] {}: fetch failed", s.name)?;
@@ -73,6 +79,9 @@ pub fn write_output(
     let total_cosmetic: u64 = summaries.iter().map(|s| s.cosmetic_rules).sum();
     let total_scriptlets: u64 = summaries.iter().map(|s| s.scriptlets_removed).sum();
     let total_redirects: u64 = summaries.iter().map(|s| s.redirects_removed).sum();
+    let total_hosts: u64 = summaries.iter().map(|s| s.hosts_converted).sum();
+    let total_uopts: u64 = summaries.iter().map(|s| s.unsupported_options).sum();
+    let total_ucosm: u64 = summaries.iter().map(|s| s.unsupported_cosmetic).sum();
     writeln!(
         w,
         "! Input rules: {} | Unique output: {} | Duplicates removed: {}",
@@ -87,6 +96,11 @@ pub fn write_output(
         w,
         "! Filtered as unsupported: {} scriptlets + {} redirects",
         total_scriptlets, total_redirects
+    )?;
+    writeln!(
+        w,
+        "! Normalized: {} hosts entries converted | Eliminated: {} unsupported options, {} unsupported cosmetic rules",
+        total_hosts, total_uopts, total_ucosm
     )?;
     writeln!(w, "!")?;
     writeln!(
