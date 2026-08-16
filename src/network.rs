@@ -38,16 +38,19 @@ pub struct SimpleRule {
 
 /// Parse a rule into a subsumption candidate. Returns `None` for exceptions,
 /// option rules, regex/entity hosts, and anything not of the exact
-/// `||host^` / `||host/path^` form.
+/// `||host^` / `||host/path^` or `||host/` / `||host/path/` form.
 pub fn parse_simple_rule(raw: &str) -> Option<SimpleRule> {
     if raw.contains('*') || raw.contains('$') || raw.contains('@') {
         return None;
     }
     let body = raw.strip_prefix("||")?;
-    if !body.ends_with('^') {
+    let (body, _terminator) = if let Some(b) = body.strip_suffix('^') {
+        (b, '^')
+    } else if let Some(b) = body.strip_suffix('/') {
+        (b, '/')
+    } else {
         return None;
-    }
-    let body = &body[..body.len() - 1];
+    };
     let (host, path) = match body.split_once('/') {
         Some((h, p)) => (h, p.to_string()),
         None => (body, String::new()),
@@ -208,6 +211,129 @@ pub fn subsume(lines: &[String]) -> (Vec<String>, u64) {
         .collect();
     let removed_count = removed.len() as u64;
     (kept, removed_count)
+}
+
+/// Convert `||host^` to `||host/` to eliminate the regex flag.
+///
+/// The `^` separator compiles to a regex character class
+/// `(?:[^\w\d\._%-]|$)` which forces lazy regex compilation and the
+/// `RegexManager` hotpath.  Converting to `/` makes the pattern a plain
+/// string, enabling SIMD `memmem` matching.
+///
+/// This is safe because hostname-anchored rules (`||host`) always match
+/// against the URL portion after the hostname, which in practice always
+/// starts with `/` for real HTTP requests.  The only behavioural
+/// difference is bare-hostname requests without a path (e.g. `https://host`
+/// without a trailing `/`), which are always redirected to `host/` by
+/// servers and are negligible for ad blocking.
+pub fn convert_bare_host_caret(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| {
+            let trimmed = line.trim();
+            if let Some(body) = trimmed.strip_prefix("||") {
+                let (pattern, opts) = match body.rfind('$') {
+                    Some(i) => (&body[..i], Some(&body[i..])),
+                    None => (body, None),
+                };
+                if let Some(host) = pattern.strip_suffix('^') {
+                    if !host.is_empty()
+                        && !host.contains('/')
+                        && !host.contains('*')
+                        && !host.contains('@')
+                    {
+                        return match opts {
+                            Some(o) => format!("||{host}/{o}"),
+                            None => format!("||{host}/"),
+                        };
+                    }
+                }
+            }
+            line.clone()
+        })
+        .collect()
+}
+
+/// Options that are pure content-type / protocol / party constraints and are
+/// therefore subsets of the optionless rule's default mask
+/// (`FROM_NETWORK_TYPES | FROM_HTTP | FROMHTTPS | THIRD_PARTY | FIRST_PARTY`).
+///
+/// A rule whose options are *exclusively* from this set is strictly covered by
+/// the same pattern without any options, so it can be dropped when the
+/// optionless variant is present.
+///
+/// `$document` is explicitly excluded: the optionless mask covers only
+/// sub-resource types (`FROM_NETWORK_TYPES`) and does *not* include
+/// `FROM_DOCUMENT`, so `$document`-only rules have unique semantics.
+fn is_subsumable_option(opt: &str) -> bool {
+    matches!(
+        opt,
+        "script"
+            | "image"
+            | "stylesheet"
+            | "object"
+            | "object-subrequest"
+            | "media"
+            | "subdocument"
+            | "ping"
+            | "xmlhttprequest"
+            | "xhr"
+            | "websocket"
+            | "font"
+            | "other"
+            | "popup"
+            | "http"
+            | "https"
+            | "third-party"
+            | "first-party"
+    )
+}
+
+/// Drop option-scoped rules (`||host/path^$script`, etc.) that are strictly
+/// covered by an optionless counterpart (`||host/path^`).
+///
+/// The optionless rule's default mask is a superset of every combination of
+/// content-type, protocol, and party-constraint options, so any rule whose
+/// options are exclusively from that set is redundant.  `$document`,
+/// `$important`, `$redirect`, `$removeparam`, `$domain`, `$badfilter`, and
+/// other structural modifiers are *not* subsumable and are left untouched.
+///
+/// Returns the filtered list and the number of rules removed.
+pub fn subsume_scoped(lines: &[String]) -> (Vec<String>, u64) {
+    // Set of optionless rule texts (rules without any `$`).
+    let optionless: HashSet<&str> = lines
+        .iter()
+        .filter(|l| !l.contains('$'))
+        .map(|l| l.as_str())
+        .collect();
+
+    let mut removed = 0u64;
+    let kept: Vec<String> = lines
+        .iter()
+        .filter(|line| {
+            let trimmed = line.trim();
+            if let Some(idx) = trimmed.rfind('$') {
+                let pattern = &trimmed[..idx];
+                // Only subsume if an optionless variant with the exact same
+                // pattern exists.
+                if optionless.contains(pattern) {
+                    let opts: Vec<&str> = trimmed[idx + 1..].split(',').collect();
+                    let dominated = opts.iter().all(|o| {
+                        let o = o.trim();
+                        o.starts_with('~') && is_subsumable_option(&o[1..])
+                            || is_subsumable_option(o)
+                    });
+                    if dominated {
+                        removed += 1;
+                        return false;
+                    }
+                }
+            }
+            true
+        })
+        .cloned()
+        .collect();
+    (kept, removed)
 }
 
 #[cfg(test)]
@@ -421,5 +547,97 @@ mod tests {
         ]);
         assert_eq!(removed, 2);
         assert_eq!(kept, vec!["||example.com/Foo^".to_string()]);
+    }
+
+    #[test]
+    fn bare_host_caret_converts_to_slash() {
+        let input: Vec<String> = vec![
+            "||example.com^".into(),
+            "||example.com/foo^".into(),
+            "||unrelated.com^".into(),
+        ];
+        let output = convert_bare_host_caret(&input);
+        assert_eq!(output[0], "||example.com/");
+        assert_eq!(output[1], "||example.com/foo^");
+        assert_eq!(output[2], "||unrelated.com/");
+    }
+
+    #[test]
+    fn bare_host_caret_with_options() {
+        let input: Vec<String> = vec!["||example.com^$script".into()];
+        let output = convert_bare_host_caret(&input);
+        assert_eq!(output[0], "||example.com/$script");
+    }
+
+    #[test]
+    fn bare_host_caret_with_path_not_converted() {
+        let input: Vec<String> = vec!["||example.com/ads^".into()];
+        let output = convert_bare_host_caret(&input);
+        assert_eq!(output[0], "||example.com/ads^");
+    }
+
+    #[test]
+    fn scoped_rule_removed_when_optionless_exists() {
+        let input: Vec<String> = vec![
+            "||example.com/ads^".into(),
+            "||example.com/ads^$script".into(),
+            "||example.com/ads^$image".into(),
+        ];
+        let (kept, removed) = subsume_scoped(&input);
+        assert_eq!(removed, 2);
+        assert_eq!(kept, vec!["||example.com/ads^".to_string()]);
+    }
+
+    #[test]
+    fn scoped_rule_kept_when_no_optionless_counterpart() {
+        let input: Vec<String> = vec!["||example.com/ads^$script".into()];
+        let (kept, removed) = subsume_scoped(&input);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, input);
+    }
+
+    #[test]
+    fn document_option_not_subsumed() {
+        let input: Vec<String> = vec![
+            "||example.com/ads^".into(),
+            "||example.com/ads^$document".into(),
+        ];
+        let (kept, removed) = subsume_scoped(&input);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, input);
+    }
+
+    #[test]
+    fn important_option_not_subsumed() {
+        let input: Vec<String> = vec![
+            "||example.com/ads^".into(),
+            "||example.com/ads^$important".into(),
+        ];
+        let (kept, removed) = subsume_scoped(&input);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, input);
+    }
+
+    #[test]
+    fn mixed_subsumable_and_non_subsumable_opts() {
+        // $document makes the whole rule non-subsumable.
+        let input: Vec<String> = vec![
+            "||example.com/ads^".into(),
+            "||example.com/ads^$script,document".into(),
+        ];
+        let (kept, removed) = subsume_scoped(&input);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, input);
+    }
+
+    #[test]
+    fn party_constraint_subsumed() {
+        let input: Vec<String> = vec![
+            "||example.com/ads^".into(),
+            "||example.com/ads^$third-party".into(),
+        ];
+        let (kept, removed) = subsume_scoped(&input);
+        assert_eq!(removed, 1);
+        assert_eq!(kept, vec!["||example.com/ads^".to_string()]);
     }
 }

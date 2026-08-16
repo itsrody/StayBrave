@@ -10,6 +10,8 @@ pub struct OptimizedRules {
     pub duplicates_removed: usize,
     pub cosmetic_subsumed: usize,
     pub network_subsumed: usize,
+    pub scoped_subsumed: usize,
+    pub caret_converted: usize,
     pub rewritten: usize,
     pub semantic_merged: usize,
 }
@@ -33,18 +35,29 @@ pub fn optimize(rules: Vec<String>, cosmetic_compat: bool, network_optimize: boo
         (unique, 0)
     };
 
-    let (rules, network_subsumed, rewritten, semantic_merged) = if network_optimize {
-        let report = Rewriter::default().rewrite_list(rules);
-        let (rules, network_subsumed) = network::subsume(&report.rules);
-        (
-            rules,
-            network_subsumed,
-            report.stats.rewritten as usize,
-            report.stats.merged_duplicates as usize,
-        )
-    } else {
-        (rules, 0, 0, 0)
-    };
+    let (rules, network_subsumed, rewritten, semantic_merged, scoped_subsumed, caret_converted) =
+        if network_optimize {
+            let report = Rewriter::default().rewrite_list(rules);
+            let rules_before_caret = report.rules.clone();
+            let rules = network::convert_bare_host_caret(&report.rules);
+            let caret_converted = rules
+                .iter()
+                .zip(rules_before_caret.iter())
+                .filter(|(after, before)| after != before)
+                .count();
+            let (rules, network_subsumed) = network::subsume(&rules);
+            let (rules, scoped_subsumed) = network::subsume_scoped(&rules);
+            (
+                rules,
+                network_subsumed,
+                report.stats.rewritten as usize,
+                report.stats.merged_duplicates as usize,
+                scoped_subsumed,
+                caret_converted,
+            )
+        } else {
+            (rules, 0, 0, 0, 0, 0)
+        };
 
     OptimizedRules {
         rules,
@@ -53,6 +66,8 @@ pub fn optimize(rules: Vec<String>, cosmetic_compat: bool, network_optimize: boo
         duplicates_removed: input_rules - unique_rules,
         cosmetic_subsumed: cosmetic_subsumed as usize,
         network_subsumed: network_subsumed as usize,
+        scoped_subsumed: scoped_subsumed as usize,
+        caret_converted,
         rewritten,
         semantic_merged,
     }
@@ -89,13 +104,13 @@ mod tests {
         assert_eq!(off.rules.len(), 3);
         let on = stats(&rules, false, true);
         assert_eq!(on.network_subsumed, 2);
-        assert_eq!(on.rules, vec!["||example.com^".to_string()]);
+        assert_eq!(on.rules, vec!["||example.com/".to_string()]);
     }
 
     #[test]
     fn rewriter_lowercases_and_merges() {
         let o = stats(&["||Example.com^", "||example.com^", "||WWW.Example.com^"], false, true);
         assert!(o.rewritten > 0);
-        assert_eq!(o.rules, vec!["||example.com^".to_string()]);
+        assert_eq!(o.rules, vec!["||example.com/".to_string()]);
     }
 }

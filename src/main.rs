@@ -135,6 +135,8 @@ async fn main() -> anyhow::Result<()> {
         duplicates_removed = optimized.duplicates_removed,
         cosmetic_subsumed = optimized.cosmetic_subsumed,
         network_subsumed = optimized.network_subsumed,
+        scoped_subsumed = optimized.scoped_subsumed,
+        caret_converted = optimized.caret_converted,
         rewritten = optimized.rewritten,
         semantic_merged = optimized.semantic_merged,
         scriptlets_removed,
