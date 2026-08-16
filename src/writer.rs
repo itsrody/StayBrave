@@ -114,8 +114,15 @@ pub fn write_output(
     let total_ctrans: u64 = summaries.iter().map(|s| s.cosmetic_transforms).sum();
     writeln!(
         w,
-        "! Input rules: {} | Unique output: {} | Duplicates removed: {} | Cosmetic subsumed: {}",
-        rules.input_rules, rules.unique_rules, rules.duplicates_removed, rules.cosmetic_subsumed
+        "! Input rules: {} | Unique output: {} | Final output: {} | Duplicates removed: {} | Cosmetic subsumed: {} | Network subsumed: {} | Rewritten: {} | Semantic duplicates merged: {}",
+        rules.input_rules,
+        rules.unique_rules,
+        rules.rules.len(),
+        rules.duplicates_removed,
+        rules.cosmetic_subsumed,
+        rules.network_subsumed,
+        rules.rewritten,
+        rules.semantic_merged
     )?;
     writeln!(
         w,
@@ -144,6 +151,10 @@ pub fn write_output(
     writeln!(
         w,
         "! Procedural cosmetic rules are rewritten into forms the Brave engine executes."
+    )?;
+    writeln!(
+        w,
+        "! Network rules are rewritten to provably-equivalent efficient forms and redundant rules subsumed by broader host/path rules are removed."
     )?;
 
     for rule in &rules.rules {

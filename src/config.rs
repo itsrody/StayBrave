@@ -104,6 +104,14 @@ pub struct FilterConfig {
     /// empty `:remove-attr()`/`:remove-class()`/`:style()`) are dropped.
     #[serde(default = "default_cosmetic_compat")]
     pub cosmetic_compat: bool,
+    /// Apply network-rule optimizations after dedup/sort: rewrite rules into
+    /// provably-equivalent efficient forms (lowercasing, `$all` removal,
+    /// redundant-wildcard trimming, semantic-duplicate merging — every rewrite
+    /// is verified by re-parsing against the original's full semantic
+    /// signature) and drop simple block rules subsumed by a strictly-broader
+    /// `||host^`/`||host/path^` rule.
+    #[serde(default = "default_network_optimize")]
+    pub network_optimize: bool,
 }
 
 impl Default for FilterConfig {
@@ -112,6 +120,7 @@ impl Default for FilterConfig {
             scriptlets: default_scriptlets_enabled(),
             redirect_allowlist: default_redirect_allowlist(),
             cosmetic_compat: default_cosmetic_compat(),
+            network_optimize: default_network_optimize(),
         }
     }
 }
@@ -186,6 +195,10 @@ fn default_scriptlets_enabled() -> bool {
 }
 
 fn default_cosmetic_compat() -> bool {
+    true
+}
+
+fn default_network_optimize() -> bool {
     true
 }
 

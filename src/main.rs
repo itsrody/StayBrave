@@ -118,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let optimized = optimize(all_rules, cfg.filter.cosmetic_compat);
+    let optimized = optimize(all_rules, cfg.filter.cosmetic_compat, cfg.filter.network_optimize);
     let scriptlets_removed: u64 = summaries.iter().map(|s| s.scriptlets_removed).sum();
     let redirects_removed: u64 = summaries.iter().map(|s| s.redirects_removed).sum();
     let hosts_converted: u64 = summaries.iter().map(|s| s.hosts_converted).sum();
@@ -131,8 +131,12 @@ async fn main() -> anyhow::Result<()> {
         bytes_transferred = fetcher.bytes_transferred(),
         input_rules = optimized.input_rules,
         unique_rules = optimized.unique_rules,
+        final_rules = optimized.rules.len(),
         duplicates_removed = optimized.duplicates_removed,
         cosmetic_subsumed = optimized.cosmetic_subsumed,
+        network_subsumed = optimized.network_subsumed,
+        rewritten = optimized.rewritten,
+        semantic_merged = optimized.semantic_merged,
         scriptlets_removed,
         redirects_removed,
         hosts_converted,
@@ -152,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
     write_output(&out_path, &cfg.output, &optimized, &summaries)?;
     tracing::info!(
         path = %out_path.display(),
-        rules = optimized.unique_rules,
+        rules = optimized.rules.len(),
         "wrote output"
     );
     Ok(())

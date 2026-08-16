@@ -3,6 +3,7 @@ pub mod config;
 pub mod cosmetic;
 pub mod fetcher;
 pub mod filter;
+pub mod network;
 pub mod normalizer;
 pub mod optimizer;
 pub mod rewriter;

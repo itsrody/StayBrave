@@ -106,6 +106,7 @@ mod tests {
             scriptlets: false,
             redirect_allowlist: Vec::new(),
             cosmetic_compat: true,
+            network_optimize: true,
         };
         let f = Filterer::new(&cfg);
         let ParsedLine::Cosmetic(cf) = parse("example.com##+js(set-constant, foo)") else {
