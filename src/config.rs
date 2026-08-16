@@ -9,6 +9,8 @@ pub struct Config {
     pub fetch: FetchConfig,
     #[serde(default)]
     pub output: OutputConfig,
+    #[serde(default)]
+    pub filter: FilterConfig,
     pub lists: Vec<ListSource>,
 }
 
@@ -63,6 +65,31 @@ impl Default for OutputConfig {
     }
 }
 
+/// Filters applied after parsing, to drop rules Brave's engine cannot use.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilterConfig {
+    /// Remove uBO scriptlet-injection rules (`##+js(...)`, `#@#+js(...)`,
+    /// `##script:inject(...)`). The adblock-rust engine parses these but cannot
+    /// execute them, so in a browser they are dead rules.
+    #[serde(default = "default_scriptlets_enabled")]
+    pub scriptlets: bool,
+    /// `$redirect`/`$redirect-rule` resources that staybrave considers
+    /// supported. Rules referencing any other resource are dropped. Aliases
+    /// (`noopjs`, `nooptext`, ...) are included alongside their canonical names.
+    #[serde(default = "default_redirect_allowlist")]
+    pub redirect_allowlist: Vec<String>,
+}
+
+impl Default for FilterConfig {
+    fn default() -> Self {
+        Self {
+            scriptlets: default_scriptlets_enabled(),
+            redirect_allowlist: default_redirect_allowlist(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListSource {
@@ -106,6 +133,34 @@ fn default_user_agent() -> String {
 
 fn default_output_file() -> String {
     "StayBrave.txt".into()
+}
+
+fn default_scriptlets_enabled() -> bool {
+    true
+}
+
+/// Canonical adblock-rust resources plus their uBO aliases, matching the set
+/// Brave's engine ships.
+fn default_redirect_allowlist() -> Vec<String> {
+    [
+        "1x1.gif", "2x2.png", "3x2.png", "32x32.png",
+        "noop.js", "noopjs",
+        "noop.txt", "nooptext",
+        "noop.html", "noopframe",
+        "noop.css",
+        "noop-1s.mp4", "noopmp4-1s",
+        "noop-2s.mp4", "noopmp4-2s",
+        "noop-0.1s.mp3", "noopmp3-0.1s",
+        "google-analytics_analytics.js",
+        "googletagmanager_gtm.js",
+        "googlesyndication_adsbygoogle.js",
+        "googletagservices_gpt.js",
+        "google-ima.js",
+        "amazon_ads.js",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 fn default_enabled() -> bool {

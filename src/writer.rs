@@ -17,6 +17,8 @@ pub struct ListSummary {
     pub empty: u64,
     pub unsupported: u64,
     pub invalid: u64,
+    pub scriptlets_removed: u64,
+    pub redirects_removed: u64,
 }
 
 pub fn write_output(
@@ -48,7 +50,7 @@ pub fn write_output(
         if s.ok {
             writeln!(
                 w,
-                "!   [ok]   {}: {} bytes (+{} included files), {} lines, {} network + {} cosmetic rules, {} empty, {} unsupported, {} invalid",
+                "!   [ok]   {}: {} bytes (+{} included files), {} lines, {} network + {} cosmetic rules, {} empty, {} unsupported, {} invalid, {} scriptlets + {} redirects filtered",
                 s.name,
                 s.bytes.unwrap_or(0),
                 s.included_files,
@@ -57,7 +59,9 @@ pub fn write_output(
                 s.cosmetic_rules,
                 s.empty,
                 s.unsupported,
-                s.invalid
+                s.invalid,
+                s.scriptlets_removed,
+                s.redirects_removed
             )?;
         } else {
             writeln!(w, "!   [fail] {}: fetch failed", s.name)?;
@@ -67,6 +71,8 @@ pub fn write_output(
 
     let total_network: u64 = summaries.iter().map(|s| s.network_rules).sum();
     let total_cosmetic: u64 = summaries.iter().map(|s| s.cosmetic_rules).sum();
+    let total_scriptlets: u64 = summaries.iter().map(|s| s.scriptlets_removed).sum();
+    let total_redirects: u64 = summaries.iter().map(|s| s.redirects_removed).sum();
     writeln!(
         w,
         "! Input rules: {} | Unique output: {} | Duplicates removed: {}",
@@ -77,8 +83,20 @@ pub fn write_output(
         "! Validated: {} network + {} cosmetic rules (adblock-rust parser)",
         total_network, total_cosmetic
     )?;
+    writeln!(
+        w,
+        "! Filtered as unsupported: {} scriptlets + {} redirects",
+        total_scriptlets, total_redirects
+    )?;
     writeln!(w, "!")?;
-    writeln!(w, "! Every rule below is validated by the adblock-rust engine parser.")?;
+    writeln!(
+        w,
+        "! Every rule below is validated by the adblock-rust engine parser."
+    )?;
+    writeln!(
+        w,
+        "! Unsupported uBO scriptlet injection and unlisted $redirect resources are removed."
+    )?;
 
     for rule in &rules.rules {
         writeln!(w, "{rule}")?;

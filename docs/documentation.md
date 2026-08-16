@@ -26,19 +26,20 @@ parse it.
 ## Pipeline
 
 ```
-lists.toml ──▶ Fetch ──▶ Analyze ──▶ Optimize ──▶ Write
-              (fetcher)  (analyzer)  (optimizer)  (writer)
-                 │            │           │            │
-              concurrent   adblock     dedup +      audit header +
-              HTTP +       parse_filter sort         StayBrave.txt
+lists.toml ──▶ Fetch ──▶ Analyze+Filter ──▶ Optimize ──▶ Write
+              (fetcher)  (analyzer/filter) (optimizer)  (writer)
+                 │            │                 │            │
+              concurrent   adblock          dedup +      audit header +
+              HTTP +       parse_filter     sort         StayBrave.txt
               !#include    validation
-              expansion
+              expansion    + scriptlet/redirect filtering
 ```
 
 | Stage | Module | Responsibility |
 | --- | --- | --- |
 | Fetch | `src/fetcher.rs` | Concurrent downloads with a semaphore, timeouts, retries + exponential backoff, redirect limits, and recursive `!#include` expansion. |
 | Analyze | `src/analyzer.rs` | Validates every line with `adblock::lists::parse_filter` (rayon-parallel) and classifies results. |
+| Filter | `src/filter.rs` | Drops rules referencing functionality the Brave engine cannot execute (uBO scriptlets, unlisted `$redirect` resources). |
 | Optimize | `src/optimizer.rs` | Removes exact duplicates and sorts deterministically. |
 | Write | `src/writer.rs` | Emits `StayBrave.txt` with a full provenance/statistics header. |
 | Config | `src/config.rs` | Typed deserialization of `lists.toml`. |
@@ -89,6 +90,12 @@ user_agent = "StayBrave/0.1 (filter-list optimizer)"
 [output]
 file = "StayBrave.txt"
 
+[filter]                          # optional; defaults match Brave's supported set
+scriptlets = true                 # strip uBO +js()/script:inject rules
+redirect_allowlist = [            # $redirect resources that are kept
+  "1x1.gif", "noop.js", "noopjs", "google-ima.js",
+]
+
 [[lists]]
 name = "EasyList"
 url = "https://easylist.to/easylist/easylist.txt"
@@ -104,6 +111,14 @@ enabled = true
 
 - `[fetch]` — all fields optional (documented defaults apply).
 - `[output]` — `file` is the default output path (CLI `-o` overrides it).
+- `[filter]` — all fields optional:
+  - `scriptlets` (default `true`) — drop uBO scriptlet-injection cosmetic rules
+    (`##+js(...)`, `#@#+js(...)`, `##script:inject(...)`). The adblock-rust
+    parser accepts them but Brave cannot execute scriptlets, so they are dead
+    weight.
+  - `redirect_allowlist` (default: the adblock-rust/Brave resource set plus uBO
+    aliases) — `$redirect`/`$redirect-rule` rules referencing any resource not
+    in this list are dropped, since they can never resolve to a real redirect.
 - `[[lists]]` — an array of sources:
   - `name` (required) — display name used in logs and the output header.
   - `url` (required) — http(s) URL of the raw filter list.
@@ -134,21 +149,37 @@ lists from `!#include <file>` directives. The fetcher:
 - Unresolvable or failed includes are replaced by a `! StayBrave: ...` comment
   (and logged), so nothing is silently lost.
 
-### 2. Analyze (`src/analyzer.rs`)
+### 2. Analyze + Filter (`src/analyzer.rs`, `src/filter.rs`)
 
 Each non-empty line is passed to `adblock::lists::parse_filter` — the same code
 Brave's engine uses — and classified:
 
 | Result | Meaning | Output |
 | --- | --- | --- |
-| `ParsedLine::Network` | Valid network rule | kept |
-| `ParsedLine::Cosmetic` | Valid cosmetic rule | kept |
+| `ParsedLine::Network` | Valid network rule | kept (unless filter drops it) |
+| `ParsedLine::Cosmetic` | Valid cosmetic rule | kept (unless filter drops it) |
 | `Err(Empty)` | Blank/whitespace-only line | skipped |
 | `Err(Unsupported)` | Comment, list header, `$$` AdGuard cosmetics, etc. | skipped |
 | other `Err(...)` | Rule the engine cannot parse | skipped |
 
 Only rules that parse successfully are written — **the output is guaranteed to
 be parseable by the adblock-rust engine.**
+
+Rules that parse but are **unsupported at runtime** are then dropped by the
+filter layer:
+
+- **uBO scriptlet injection** — cosmetic rules carrying the engine's
+  `SCRIPT_INJECT` flag (`##+js(...)`, `#@#+js(...)`) or the legacy
+  `script:inject(...)` selector. The engine parses these as cosmetic filters
+  but has no scriptlet runtime to execute them, so they would never run in a
+  browser.
+- **Unlisted `$redirect` / `$redirect-rule` resources** — any redirect rule
+  whose resource name is absent from `filter.redirect_allowlist` (default: the
+  resources adblock-rust/Brave ships, plus uBO aliases like `noopjs`,
+  `nooptext`, `noopframe`). Without a matching resource the rule can never
+  redirect, so it is removed.
+
+Filtered counts are reported per source in the output header.
 
 ### 3. Optimize (`src/optimizer.rs`)
 
@@ -162,9 +193,10 @@ The output file starts with a `!`-comment header containing:
 
 - Generation timestamp (UTC).
 - Per-source audit line: bytes fetched, included files expanded, line counts,
-  network/cosmetic rules, unsupported and invalid counts.
+  network/cosmetic rules, unsupported and invalid counts, plus scriptlet and
+  redirect rules filtered.
 - Global totals: input rules, unique output rules, duplicates removed,
-  validated network + cosmetic counts.
+  validated network + cosmetic counts, filtered scriptlet + redirect counts.
 
 ---
 
@@ -185,6 +217,10 @@ The output file starts with a `!`-comment header containing:
 - **Cosmetic section separators are not written.** Adblock-style `[Section]`
   headers would be parsed as network filters, so sections are intentionally
   omitted; the list is one flat sorted set.
+- **uBO scriptlet injection rules are dropped.** `##+js(...)`,
+  `#@#+js(...)`, and `##script:inject(...)` rules are parsed as cosmetic
+  filters but cannot be executed by the engine, so they are filtered out (see
+  `[filter]`).
 - **Deduplication is exact-text**, not semantic. The engine's `Engine`
   internally normalizes equivalent rules at load time; a `.txt` list cannot do
   better.

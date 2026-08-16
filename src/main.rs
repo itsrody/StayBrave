@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use staybrave::analyzer::Analyzer;
 use staybrave::config::Config;
 use staybrave::fetcher::Fetcher;
+use staybrave::filter::Filterer;
 use staybrave::optimizer::optimize;
 use staybrave::writer::{ListSummary, write_output};
 
@@ -43,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
     let results = fetcher.fetch_all(&cfg.lists).await;
 
     let analyzer = Analyzer::default();
+    let filterer = Filterer::new(&cfg.filter);
     let mut all_rules = Vec::new();
     let mut summaries = Vec::new();
     let mut sources_ok = 0usize;
@@ -52,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
         match &r.result {
             Ok(fetched) => {
                 sources_ok += 1;
-                let (rules, stats) = analyzer.analyze(fetched);
+                let (rules, stats) = analyzer.analyze(fetched, &filterer);
                 all_rules.extend(rules);
                 tracing::info!(
                     list = %r.source.name,
@@ -64,6 +66,8 @@ async fn main() -> anyhow::Result<()> {
                     empty = stats.empty,
                     unsupported = stats.unsupported,
                     invalid = stats.invalid,
+                    scriptlets_removed = stats.scriptlets_removed,
+                    redirects_removed = stats.redirects_removed,
                     "analyzed"
                 );
                 summaries.push(ListSummary {
@@ -77,6 +81,8 @@ async fn main() -> anyhow::Result<()> {
                     empty: stats.empty,
                     unsupported: stats.unsupported,
                     invalid: stats.invalid,
+                    scriptlets_removed: stats.scriptlets_removed,
+                    redirects_removed: stats.redirects_removed,
                 });
             }
             Err(e) => {
@@ -93,12 +99,16 @@ async fn main() -> anyhow::Result<()> {
                     empty: 0,
                     unsupported: 0,
                     invalid: 0,
+                    scriptlets_removed: 0,
+                    redirects_removed: 0,
                 });
             }
         }
     }
 
     let optimized = optimize(all_rules);
+    let scriptlets_removed: u64 = summaries.iter().map(|s| s.scriptlets_removed).sum();
+    let redirects_removed: u64 = summaries.iter().map(|s| s.redirects_removed).sum();
     tracing::info!(
         sources_fetched = sources_ok,
         sources_failed,
@@ -106,6 +116,8 @@ async fn main() -> anyhow::Result<()> {
         input_rules = optimized.input_rules,
         unique_rules = optimized.unique_rules,
         duplicates_removed = optimized.duplicates_removed,
+        scriptlets_removed,
+        redirects_removed,
         "optimization complete"
     );
 

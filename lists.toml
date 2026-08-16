@@ -11,6 +11,27 @@ user_agent = "StayBrave/0.1 (filter-list optimizer; https://github.com/itsrody/S
 [output]
 file = "StayBrave.txt"
 
+# Rules referencing functionality Brave's engine cannot execute are dropped.
+# The defaults below match the resources adblock-rust/Brave ships.
+[filter]
+scriptlets = true
+redirect_allowlist = [
+  "1x1.gif", "2x2.png", "3x2.png", "32x32.png",
+  "noop.js", "noopjs",
+  "noop.txt", "nooptext",
+  "noop.html", "noopframe",
+  "noop.css",
+  "noop-1s.mp4", "noopmp4-1s",
+  "noop-2s.mp4", "noopmp4-2s",
+  "noop-0.1s.mp3", "noopmp3-0.1s",
+  "google-analytics_analytics.js",
+  "googletagmanager_gtm.js",
+  "googlesyndication_adsbygoogle.js",
+  "googletagservices_gpt.js",
+  "google-ima.js",
+  "amazon_ads.js",
+]
+
 [[lists]]
 name = "EasyList"
 url = "https://easylist.to/easylist/easylist.txt"
