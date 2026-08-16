@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
     let out_path = cli
         .output
         .unwrap_or_else(|| PathBuf::from(&cfg.output.file));
-    write_output(&out_path, &optimized, &summaries)?;
+    write_output(&out_path, &cfg.output, &optimized, &summaries)?;
     tracing::info!(
         path = %out_path.display(),
         rules = optimized.unique_rules,

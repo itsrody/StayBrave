@@ -55,12 +55,28 @@ impl Default for FetchConfig {
 pub struct OutputConfig {
     #[serde(default = "default_output_file")]
     pub file: String,
+    /// Filter-list title shown by the adblock manager.
+    #[serde(default = "default_output_title")]
+    pub title: String,
+    /// Short single-line description of what this list is and how it is built.
+    #[serde(default = "default_output_description")]
+    pub description: String,
+    /// Suggested update frequency, in the form `N days` (or `N hours`), as
+    /// understood by adblock managers (`! Expires:`).
+    #[serde(default = "default_output_expires")]
+    pub expires: String,
+    #[serde(default = "default_output_homepage")]
+    pub homepage: String,
 }
 
 impl Default for OutputConfig {
     fn default() -> Self {
         Self {
             file: default_output_file(),
+            title: default_output_title(),
+            description: default_output_description(),
+            expires: default_output_expires(),
+            homepage: default_output_homepage(),
         }
     }
 }
@@ -147,6 +163,22 @@ fn default_user_agent() -> String {
 
 fn default_output_file() -> String {
     "StayBrave.txt".into()
+}
+
+fn default_output_title() -> String {
+    "StayBrave".into()
+}
+
+fn default_output_description() -> String {
+    "StayBrave is a merged, de-duplicated, sorted filter list optimized for the adblock-rust engine Brave ships. It combines EasyList, uBlock Origin, AdGuard, Fanboy, and StevenBlack sources; removes scriptlet injections and $redirect resources the engine cannot execute; and rewrites cosmetic rules into forms Brave actually runs.".into()
+}
+
+fn default_output_expires() -> String {
+    "3 days".into()
+}
+
+fn default_output_homepage() -> String {
+    "https://github.com/itsrody/StayBrave".into()
 }
 
 fn default_scriptlets_enabled() -> bool {

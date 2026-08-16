@@ -38,7 +38,9 @@ jobs:
       - name: Verify output
         run: |
           test -s output/StayBrave.txt
-          head -1 output/StayBrave.txt | grep -q "StayBrave" || { echo "unexpected output header"; exit 1; }
+          grep -q '^! Title: StayBrave' output/StayBrave.txt || { echo "unexpected output header"; exit 1; }
+          grep -q '^! Version: ' output/StayBrave.txt || { echo "missing version metadata"; exit 1; }
+          grep -q '^! Expires: ' output/StayBrave.txt || { echo "missing expires metadata"; exit 1; }
           echo "output OK: $(wc -l < output/StayBrave.txt) lines"
           # Full gate: builds the adblock-rust engine from the list, probes a
           # sample of every simple rule for liveness, and rejects any cosmetic

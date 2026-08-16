@@ -222,15 +222,22 @@ cosmetic syntax the engine does not recognize (AdGuard `$cookie`, `$stealth`,
 
 ### 5. Write (`src/writer.rs`)
 
-The output file starts with a `!`-comment header containing:
+The output file starts with the ABP-standard `[Adblock Plus 2.0]` marker and a
+metadata header (`! Title`, `! Version`, `! Description`, `! Expires`,
+`! Homepage`, `! Last modified`) so adblock managers can display the list and
+schedule updates, followed by a `!`-comment provenance/statistics header with:
 
 - Generation timestamp (UTC).
 - Per-source audit line: bytes fetched, included files expanded, line counts,
   network/cosmetic rules, unsupported, invalid, hosts-converted, scriptlet and
   redirect counts, and unrecognized-option/unsupported-cosmetic counts.
-- Global totals: input rules, unique output rules, duplicates removed,
-  validated network + cosmetic counts, filtered scriptlet + redirect counts,
-  and normalization/elimination totals.
+- Global totals: input rules, unique output rules, duplicates removed, cosmetic
+  rules subsumed, validated network + cosmetic counts, filtered scriptlet +
+  redirect counts, and normalization/elimination totals.
+
+The `Title`, `Description`, `Expires`, and `Homepage` values come from the
+`[output]` section of `lists.toml`; `Version` is the generation timestamp
+(EasyList-style `YYYYMMDDHHMM`), so every build is monotonic.
 
 ---
 

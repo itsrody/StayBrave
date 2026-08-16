@@ -11,6 +11,15 @@ user_agent = "StayBrave/0.1 (filter-list optimizer; https://github.com/itsrody/S
 [output]
 file = "output/StayBrave.txt"
 
+# Header metadata written to the top of the list. Title, description, and
+# expires are emitted as ABP-standard `! Key: value` lines so adblock managers
+# can display and auto-update the list; version is the generation timestamp.
+title = "StayBrave"
+description = "StayBrave is a merged, de-duplicated, sorted filter list optimized for the adblock-rust engine Brave ships. It combines EasyList, uBlock Origin, AdGuard, Fanboy, and StevenBlack sources; removes scriptlet injections and $redirect resources the engine cannot execute; and rewrites cosmetic rules into forms Brave actually runs."
+# Matches the publish workflow cadence (every 3rd day of the month).
+expires = "3 days"
+homepage = "https://github.com/itsrody/StayBrave"
+
 # Rules referencing functionality Brave's engine cannot execute are dropped.
 # The defaults below match the resources adblock-rust/Brave ships. Redirect
 # resource values are canonicalized (uBO aliases, `abp-resource:` prefix) by

@@ -1,3 +1,4 @@
+use crate::config::OutputConfig;
 use crate::optimizer::OptimizedRules;
 use anyhow::{Context, Result};
 use std::fs::File;
@@ -25,12 +26,43 @@ pub struct ListSummary {
     pub cosmetic_transforms: u64,
 }
 
-pub fn write_output(path: &Path, rules: &OptimizedRules, summaries: &[ListSummary]) -> Result<()> {
+pub fn write_output(
+    path: &Path,
+    output: &OutputConfig,
+    rules: &OptimizedRules,
+    summaries: &[ListSummary],
+) -> Result<()> {
     let mut w =
         BufWriter::new(File::create(path).with_context(|| format!("creating {}", path.display()))?);
 
     let now = OffsetDateTime::now_utc();
-    writeln!(w, "! StayBrave - optimized adblock-rust filter list")?;
+    // Version is the generation timestamp (EasyList-style YYYYMMDDHHMM) so
+    // every build is monotonic and adblock managers can detect updates.
+    writeln!(w, "[Adblock Plus 2.0]")?;
+    writeln!(w, "! Title: {}", output.title)?;
+    writeln!(
+        w,
+        "! Version: {:04}{:02}{:02}{:02}{:02}",
+        now.year(),
+        now.month() as u8,
+        now.day(),
+        now.hour(),
+        now.minute()
+    )?;
+    writeln!(w, "! Description: {}", output.description)?;
+    writeln!(w, "! Expires: {}", output.expires)?;
+    writeln!(w, "! Homepage: {}", output.homepage)?;
+    writeln!(
+        w,
+        "! Last modified: {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        now.year(),
+        now.month() as u8,
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    )?;
+    writeln!(w, "!")?;
     writeln!(
         w,
         "! Generated: {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
