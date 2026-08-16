@@ -4,7 +4,7 @@ use crate::filter::Filterer;
 use crate::normalizer::{normalize_hosts_line, normalize_line};
 use adblock::filters::cosmetic::CosmeticFilterError;
 use adblock::filters::network::NetworkFilterError;
-use adblock::lists::{FilterParseError, ParseOptions, ParsedLine, parse_filter};
+use adblock::lists::{parse_filter, FilterParseError, ParseOptions, ParsedLine};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -148,12 +148,7 @@ impl Analyzer {
             .collect()
     }
 
-    fn classify(
-        &self,
-        line: &str,
-        filterer: &Filterer,
-        stats: &AtomicListStats,
-    ) -> Option<String> {
+    fn classify(&self, line: &str, filterer: &Filterer, stats: &AtomicListStats) -> Option<String> {
         match parse_filter(line, false, self.opts) {
             Ok(ParsedLine::Network(f)) => {
                 if filterer.is_unsupported_redirect(&f) {

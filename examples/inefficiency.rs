@@ -20,8 +20,15 @@ fn main() {
     let report = rewriter.rewrite_list(rules);
 
     let s = &report.stats;
-    println!("input            : {} rules ({} network, {} cosmetic)", s.total, s.network, s.cosmetic);
-    println!("regex-backed     : {} ({:.1}% of network)", s.regex, pct(s.regex, s.network));
+    println!(
+        "input            : {} rules ({} network, {} cosmetic)",
+        s.total, s.network, s.cosmetic
+    );
+    println!(
+        "regex-backed     : {} ({:.1}% of network)",
+        s.regex,
+        pct(s.regex, s.network)
+    );
     println!("  complete regex : {}", s.complete_regex);
     println!("explicit $all    : {}", s.with_all);
     println!("domain options   : {}", s.with_domains);
@@ -29,7 +36,10 @@ fn main() {
     println!("trimmable '*'    : {}", s.trimmable_wildcards);
     println!("mixed-case       : {}", s.mixed_case);
     println!("rewritten        : {}", s.rewritten);
-    println!("semantic unique  : {}  (merged {} duplicates)", s.kept, s.merged_duplicates);
+    println!(
+        "semantic unique  : {}  (merged {} duplicates)",
+        s.kept, s.merged_duplicates
+    );
 
     let mut cats: Vec<_> = report.samples.keys().collect();
     cats.sort();

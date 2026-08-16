@@ -25,14 +25,9 @@ pub struct ListSummary {
     pub cosmetic_transforms: u64,
 }
 
-pub fn write_output(
-    path: &Path,
-    rules: &OptimizedRules,
-    summaries: &[ListSummary],
-) -> Result<()> {
-    let mut w = BufWriter::new(
-        File::create(path).with_context(|| format!("creating {}", path.display()))?,
-    );
+pub fn write_output(path: &Path, rules: &OptimizedRules, summaries: &[ListSummary]) -> Result<()> {
+    let mut w =
+        BufWriter::new(File::create(path).with_context(|| format!("creating {}", path.display()))?);
 
     let now = OffsetDateTime::now_utc();
     writeln!(w, "! StayBrave - optimized adblock-rust filter list")?;
@@ -87,8 +82,8 @@ pub fn write_output(
     let total_ctrans: u64 = summaries.iter().map(|s| s.cosmetic_transforms).sum();
     writeln!(
         w,
-        "! Input rules: {} | Unique output: {} | Duplicates removed: {}",
-        rules.input_rules, rules.unique_rules, rules.duplicates_removed
+        "! Input rules: {} | Unique output: {} | Duplicates removed: {} | Cosmetic subsumed: {}",
+        rules.input_rules, rules.unique_rules, rules.duplicates_removed, rules.cosmetic_subsumed
     )?;
     writeln!(
         w,

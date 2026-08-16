@@ -40,10 +40,7 @@ pub fn normalize_line(line: &str) -> Normalized {
             // literal substring filter. Lines whose domains are all localhost
             // aliases expand to nothing.
             let domains = hosts_domains(trimmed);
-            let lines: Vec<String> = domains
-                .into_iter()
-                .map(|d| format!("||{d}^"))
-                .collect();
+            let lines: Vec<String> = domains.into_iter().map(|d| format!("||{d}^")).collect();
             return Normalized {
                 hosts_converted: !lines.is_empty(),
                 lines,
@@ -231,7 +228,7 @@ fn translate_option(opt: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adblock::lists::{ParsedLine, ParseOptions, parse_filter};
+    use adblock::lists::{parse_filter, ParseOptions, ParsedLine};
 
     fn parse(line: &str) -> ParsedLine<'_> {
         parse_filter(line, false, ParseOptions::default())

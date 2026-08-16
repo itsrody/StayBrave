@@ -1,8 +1,8 @@
 use crate::config::{FetchConfig, ListSource};
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
@@ -46,9 +46,10 @@ impl Fetcher {
     }
 
     pub async fn fetch_all(&self, lists: &[ListSource]) -> Vec<SourceResult> {
-        let tasks = lists.iter().filter(|l| l.enabled).map(|list| async move {
-            self.fetch_list(list).await
-        });
+        let tasks = lists
+            .iter()
+            .filter(|l| l.enabled)
+            .map(|list| async move { self.fetch_list(list).await });
         futures::future::join_all(tasks).await
     }
 
@@ -60,14 +61,8 @@ impl Fetcher {
         let result = async {
             let root = self.fetch_with_retry(&list.url).await?;
             let text = if self.cfg.expand_includes {
-                self.expand_includes(
-                    root,
-                    list.url.clone(),
-                    0,
-                    &mut visited,
-                    &mut included_files,
-                )
-                .await?
+                self.expand_includes(root, list.url.clone(), 0, &mut visited, &mut included_files)
+                    .await?
             } else {
                 root
             };
@@ -191,7 +186,11 @@ impl Fetcher {
 fn parse_include_directive(line: &str) -> Option<String> {
     let line = line.trim();
     let rest = line.strip_prefix("!#include")?;
-    let url = rest.trim().trim_start_matches('<').trim_end_matches('>').trim();
+    let url = rest
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim();
     if url.is_empty() {
         None
     } else {

@@ -175,7 +175,9 @@ fn find_cosmetic_contamination(lines: &[String]) -> Vec<String> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let out_path = std::env::args().nth(1).unwrap_or_else(|| "StayBrave.txt".into());
+    let out_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "StayBrave.txt".into());
     let sample: usize = std::env::var("VERIFY_SAMPLE")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -190,7 +192,12 @@ fn main() -> anyhow::Result<()> {
         .map(|l| l.to_string())
         .collect();
     let bytes: usize = lines.iter().map(|l| l.len() + 1).sum();
-    println!("[{:4}ms] read {} lines ({:.1} MB)", t0.elapsed().as_millis(), lines.len(), bytes as f64 / 1e6);
+    println!(
+        "[{:4}ms] read {} lines ({:.1} MB)",
+        t0.elapsed().as_millis(),
+        lines.len(),
+        bytes as f64 / 1e6
+    );
     std::io::stdout().flush().unwrap();
 
     let t = Instant::now();
@@ -227,7 +234,10 @@ fn main() -> anyhow::Result<()> {
 
     let t = Instant::now();
     let engine = Engine::new_with_list_text(lines.join("\n"));
-    println!("[{:4}ms] engine build from {out_path}", t.elapsed().as_millis());
+    println!(
+        "[{:4}ms] engine build from {out_path}",
+        t.elapsed().as_millis()
+    );
     std::io::stdout().flush().unwrap();
 
     let all: Vec<SimpleRule> = lines.iter().filter_map(|r| parse_simple_rule(r)).collect();

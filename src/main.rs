@@ -1,11 +1,11 @@
 use clap::Parser;
-use std::path::PathBuf;
 use staybrave::analyzer::Analyzer;
 use staybrave::config::Config;
 use staybrave::fetcher::Fetcher;
 use staybrave::filter::Filterer;
 use staybrave::optimizer::optimize;
-use staybrave::writer::{ListSummary, write_output};
+use staybrave::writer::{write_output, ListSummary};
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -118,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let optimized = optimize(all_rules);
+    let optimized = optimize(all_rules, cfg.filter.cosmetic_compat);
     let scriptlets_removed: u64 = summaries.iter().map(|s| s.scriptlets_removed).sum();
     let redirects_removed: u64 = summaries.iter().map(|s| s.redirects_removed).sum();
     let hosts_converted: u64 = summaries.iter().map(|s| s.hosts_converted).sum();
@@ -132,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
         input_rules = optimized.input_rules,
         unique_rules = optimized.unique_rules,
         duplicates_removed = optimized.duplicates_removed,
+        cosmetic_subsumed = optimized.cosmetic_subsumed,
         scriptlets_removed,
         redirects_removed,
         hosts_converted,

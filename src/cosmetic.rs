@@ -1,6 +1,12 @@
 //! Post-normalization rewriting of cosmetic rules into forms the procedural
 //! engine Brave ships actually executes.
 //!
+//! Also performs same-selector host-scope subsumption: a host-scoped cosmetic
+//! rule is redundant when an identical selector is already covered by a broader
+//! host scope. The adblock-rust engine matches a host-scoped rule under token
+//! `T` against every URL whose domain-label chain contains `T` (i.e. `T` and
+//! its subdomains), so host coverage is provable:
+//!
 //! Ground truth was verified live against Brave 151.1.93.136 (adblock-rust
 //! built without the `css-validation` feature, so every cosmetic selector
 //! reaches the browser as one raw CSS string that Brave's C++ routes to its
@@ -15,6 +21,8 @@
 //!   `:matches-media`, `:watch-attr`, `:-abp-properties`, `:nth-ancestor`,
 //!   `:matches-prop`, empty `:remove-attr()`/`:remove-class()`/`:style()`, and
 //!   every comma list that contains one of the procedural/action operators.
+
+use std::collections::{HashMap, HashSet};
 
 /// Procedural operators and actions the Brave procedural engine executes on a
 /// single simple selector. A comma list containing any of these is dead in
@@ -259,6 +267,160 @@ fn contains_any(s: &str, ops: &[&str]) -> bool {
     ops.iter().any(|op| s.contains(op))
 }
 
+/// A host-scoped cosmetic rule that is a candidate for same-selector scope
+/// subsumption.
+struct HostRule {
+    /// `true` for `##` hides, `false` for `#@#` exceptions.
+    kind: bool,
+    selector: String,
+    /// Positive hostname tokens (already lowercased). Empty rules never reach
+    /// here.
+    positives: Vec<String>,
+    /// Index into the input lines.
+    index: usize,
+}
+
+/// True when a rule token `a` provably covers a rule token `b` under the
+/// engine's matching semantics: a token matches a request only if it is one of
+/// the request's probed label-chain suffixes, which are the suffixes from the
+/// registrable domain (via the embedded public suffix list) up to the full
+/// hostname. So `a` covers `b` iff `a` is a suffix of `b` and still contains
+/// the registrable domain of `b` (otherwise `a` is below the registrable domain
+/// and is never probed, e.g. a public-suffix token like `com.pl` or `co.uk`).
+fn covers(a: &str, b: &str, reg_of_b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    b.len() > a.len()
+        && b.ends_with(a)
+        && b.as_bytes()[b.len() - a.len() - 1] == b'.'
+        && a.ends_with(reg_of_b)
+}
+
+/// True when the token set `a` covers `b`: every token of `b` is `a`-scoped.
+fn token_sets_cover(a: &[String], b: &[String], reg: &HashMap<String, Option<String>>) -> bool {
+    b.iter().all(|t| {
+        reg.get(t)
+            .and_then(|r| r.as_ref())
+            .is_some_and(|r| a.iter().any(|p| covers(p, t, r)))
+    })
+}
+
+/// Registrable domain of a rule token, matching the engine's own resolver.
+fn registrable_domain(token: &str) -> Option<String> {
+    let url = format!("https://{token}/");
+    adblock::url_parser::parse_url(&url).map(|u| u.domain().to_ascii_lowercase())
+}
+
+/// Extract the positive hostname tokens of a rule's host part. Returns `None`
+/// when the rule cannot participate in subsumption (entities, negations, or a
+/// non-hostname location such as a regex) — such rules are opaque.
+fn positive_host_tokens(host: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    for part in host.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if part.starts_with('~') || part.ends_with(".*") {
+            return None;
+        }
+        if !part
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        {
+            return None;
+        }
+        out.push(part.to_ascii_lowercase());
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+/// Drop cosmetic rules that are redundant because an identical selector is
+/// already covered by a broader host scope, following the engine's match
+/// semantics:
+///
+/// Among host-scoped rules with the same selector and kind (`##` vs `#@#`), a
+/// rule whose hostname tokens are all subdomains of another rule's tokens is
+/// redundant, because the broader rule matches every URL the narrower one does
+/// through the same delivery channel (host-scoped hides / exceptions are
+/// resolved per navigation by probing the label chain).
+///
+/// Generic rules are never used as covers: generic selectors are delivered
+/// through different channels (the per-page `misc_generic_selectors` scan or
+/// `hidden_class_id_selectors`, both skipped under `$generichide`), so a
+/// generic rule does not provably substitute for a host-scoped one.
+///
+/// Only plain-CSS (non-procedural) rules with pure hostname constraints
+/// participate; rules using entities (`x.*`), negations (`~x`), or procedural
+/// operators are left untouched. Returns the kept lines and how many were
+/// removed.
+pub fn subsume(lines: &[String]) -> (Vec<String>, u64) {
+    let mut rules: Vec<HostRule> = Vec::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        let Some((host, sep, selector)) = split_cosmetic(line) else {
+            continue;
+        };
+        if is_procedural(selector) {
+            continue;
+        }
+        let kind = sep == "##";
+        if host.is_empty() {
+            continue;
+        }
+        let Some(positives) = positive_host_tokens(host) else {
+            continue;
+        };
+        rules.push(HostRule {
+            kind,
+            selector: selector.to_string(),
+            positives,
+            index,
+        });
+    }
+
+    let mut reg: HashMap<String, Option<String>> = HashMap::new();
+    for token in rules
+        .iter()
+        .flat_map(|r| r.positives.iter())
+        .map(|t| t.as_str())
+        .collect::<HashSet<_>>()
+    {
+        reg.insert(token.to_string(), registrable_domain(token));
+    }
+
+    let mut removed: HashSet<usize> = HashSet::new();
+    for rule in &rules {
+        for other in rules
+            .iter()
+            .filter(|o| o.kind == rule.kind && o.selector == rule.selector)
+        {
+            if other.index == rule.index {
+                continue;
+            }
+            if token_sets_cover(&other.positives, &rule.positives, &reg)
+                && !token_sets_cover(&rule.positives, &other.positives, &reg)
+            {
+                removed.insert(rule.index);
+                break;
+            }
+        }
+    }
+
+    let kept: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !removed.contains(i))
+        .map(|(_, l)| l.clone())
+        .collect();
+    let removed_count = removed.len() as u64;
+    (kept, removed_count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +584,140 @@ mod tests {
             split_top_level("a[href^=\"x,y\"], .b:style(z: w)", ','),
             vec!["a[href^=\"x,y\"]".to_string(), ".b:style(z: w)".to_string()]
         );
+    }
+
+    #[test]
+    fn subsume_generic_never_covers_host() {
+        let lines = vec![
+            "##.ad".to_string(),
+            "example.com##.ad".to_string(),
+            "www.example.com##.ad".to_string(),
+        ];
+        let (kept, removed) = subsume(&lines);
+        assert_eq!(removed, 1); // www.example.com##.ad only (host-covered)
+        assert_eq!(
+            kept,
+            vec![
+                "##.ad".to_string(),
+                "example.com##.ad".to_string(),
+                "www.example.com##.ad".to_string()
+            ]
+            .into_iter()
+            .filter(|l| l != "www.example.com##.ad")
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn subsume_parent_domain_covers_child() {
+        let lines = vec![
+            "example.com##.ad".to_string(),
+            "www.example.com##.ad".to_string(),
+            "sub.www.example.com##.ad".to_string(),
+            "unrelated.com##.ad".to_string(),
+        ];
+        let (kept, removed) = subsume(&lines);
+        assert_eq!(removed, 2);
+        assert_eq!(
+            kept,
+            vec![
+                "example.com##.ad".to_string(),
+                "unrelated.com##.ad".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn subsume_public_suffix_never_covers() {
+        // A TLD/public-suffix token is below the registrable domain and is
+        // never probed by the engine, so it cannot cover a real host.
+        let lines = vec![
+            "pl#@#[class$=\"-ads\"]".to_string(),
+            "android.com.pl#@#[class$=\"-ads\"]".to_string(),
+            "co.uk##.ad".to_string(),
+            "www.bbc.co.uk##.ad".to_string(),
+        ];
+        let (kept, removed) = subsume(&lines);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, lines);
+    }
+
+    #[test]
+    fn subsume_unrelated_hosts_kept() {
+        let lines = vec![
+            "a.com##.ad".to_string(),
+            "b.com##.ad".to_string(),
+            "a.com##.other".to_string(),
+        ];
+        let (kept, removed) = subsume(&lines);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, lines);
+    }
+
+    #[test]
+    fn subsume_respects_kinds() {
+        // A generic hide must not cover a #@# exception; parent exception
+        // covers child exception of the same kind.
+        let lines = vec![
+            "##.ad".to_string(),
+            "example.com#@#.ad".to_string(),
+            "www.example.com#@#.ad".to_string(),
+        ];
+        let (kept, removed) = subsume(&lines);
+        assert_eq!(removed, 1);
+        assert_eq!(
+            kept,
+            vec!["##.ad".to_string(), "example.com#@#.ad".to_string()]
+        );
+    }
+
+    #[test]
+    fn subsume_skips_opaque_rules() {
+        let lines = vec![
+            "example.*##.ad".to_string(),
+            "www.example.com##.ad".to_string(),
+            "~blocked.com##.ad".to_string(),
+            "a.com##.x:has-text(y)".to_string(),
+            "www.a.com##.x:has-text(y)".to_string(),
+        ];
+        let (kept, removed) = subsume(&lines);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, lines);
+    }
+
+    #[test]
+    fn subsume_generic_rule_keeps_all_hosts() {
+        let lines = vec![
+            "##.ad".to_string(),
+            "example.com##.ad".to_string(),
+            "example.com#@#.ad".to_string(),
+            "#@#.ad".to_string(),
+        ];
+        let (kept, removed) = subsume(&lines);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, lines);
+    }
+
+    #[test]
+    fn subsume_multi_token() {
+        let lines = vec![
+            "example.com,www.example.com##.ad".to_string(),
+            "sub.example.com##.ad".to_string(),
+        ];
+        let (kept, removed) = subsume(&lines);
+        assert_eq!(removed, 1);
+        assert_eq!(kept, vec!["example.com,www.example.com##.ad".to_string()]);
+    }
+
+    #[test]
+    fn subsume_leaves_non_cosmetic_alone() {
+        let lines = vec![
+            "||example.com^".to_string(),
+            "example.com#?#.x:-abp-properties(y)".to_string(),
+            "! comment".to_string(),
+        ];
+        let (kept, removed) = subsume(&lines);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, lines);
     }
 }

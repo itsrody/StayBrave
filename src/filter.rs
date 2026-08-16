@@ -41,11 +41,16 @@ impl Filterer {
     /// (ABP `abp-resource:` prefix stripped, uBO aliases resolved) so the
     /// allowlist only needs canonical names.
     pub fn is_unsupported_redirect(&self, f: &NetworkFilter) -> bool {
-        if !f.features_mask.contains(NetworkFilterFeaturesMask::IS_REDIRECT) {
+        if !f
+            .features_mask
+            .contains(NetworkFilterFeaturesMask::IS_REDIRECT)
+        {
             return false;
         }
         match f.modifier_option {
-            Some(resource) => !self.redirect_allowlist.contains(canonical_resource(resource)),
+            Some(resource) => !self
+                .redirect_allowlist
+                .contains(canonical_resource(resource)),
             None => true,
         }
     }
@@ -54,7 +59,7 @@ impl Filterer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adblock::lists::{ParsedLine, ParseOptions, parse_filter};
+    use adblock::lists::{parse_filter, ParseOptions, ParsedLine};
 
     fn parse(line: &str) -> ParsedLine<'_> {
         parse_filter(line, false, ParseOptions::default())
@@ -83,7 +88,11 @@ mod tests {
     #[test]
     fn keeps_plain_cosmetic() {
         let f = filterer();
-        for line in ["example.com##.ad", "example.com##.ad > p", "example.com#@#.ad"] {
+        for line in [
+            "example.com##.ad",
+            "example.com##.ad > p",
+            "example.com#@#.ad",
+        ] {
             let ParsedLine::Cosmetic(cf) = parse(line) else {
                 panic!("{line} not cosmetic");
             };

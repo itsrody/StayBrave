@@ -1,6 +1,6 @@
 use adblock::filters::cosmetic::CosmeticFilter;
 use adblock::filters::network::{NetworkFilter, NetworkFilterMaskHelper};
-use adblock::lists::{ParseOptions, ParsedLine, parse_filter};
+use adblock::lists::{parse_filter, ParseOptions, ParsedLine};
 use std::collections::HashMap;
 
 const MAX_SAMPLES: usize = 5;
@@ -264,7 +264,8 @@ fn has_trimmable_wildcards(pattern: &str) -> bool {
 
 fn strip_anchors(pattern: &str) -> &str {
     let p = pattern.strip_prefix("@@").unwrap_or(pattern);
-    p.strip_prefix("||").unwrap_or_else(|| p.strip_prefix('|').unwrap_or(p))
+    p.strip_prefix("||")
+        .unwrap_or_else(|| p.strip_prefix('|').unwrap_or(p))
 }
 
 /// Generate candidate rewrites. Every candidate is re-parsed and compared
@@ -404,7 +405,10 @@ mod tests {
             ("*ads", "ads"),
             ("||example.com^$all", "||example.com^"),
             ("||example.com^$script,all", "||example.com^"),
-            ("||example.com^$all,domain=example.org", "||example.com^$domain=example.org"),
+            (
+                "||example.com^$all,domain=example.org",
+                "||example.com^$domain=example.org",
+            ),
         ] {
             let (got, d) = rw.rewrite_rule(input);
             assert_eq!(got, want, "for {input} (diag={d:?})");
