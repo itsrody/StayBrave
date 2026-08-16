@@ -33,11 +33,16 @@ jobs:
       - name: Generate StayBrave.txt
         run: ./target/release/staybrave --config lists.toml --output StayBrave.txt
 
-      - name: Smoke-test output
+      - name: Verify output
         run: |
           test -s StayBrave.txt
           head -1 StayBrave.txt | grep -q "StayBrave" || { echo "unexpected output header"; exit 1; }
           echo "output OK: $(wc -l < StayBrave.txt) lines"
+          # Full gate: builds the adblock-rust engine from the list, probes a
+          # sample of every simple rule for liveness, and rejects any cosmetic
+          # rule that survived with a dead operator or an unsplit procedural
+          # comma list.
+          cargo run --release --example verify -- StayBrave.txt
 
       - name: Compute release tag
         id: tag

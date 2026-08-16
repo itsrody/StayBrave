@@ -80,6 +80,14 @@ pub struct FilterConfig {
     /// canonical names by the normalizer before they reach this list.
     #[serde(default = "default_redirect_allowlist")]
     pub redirect_allowlist: Vec<String>,
+    /// Rewrite cosmetic rules into forms the procedural engine Brave ships
+    /// actually executes: `:contains` -> `:has-text`, `:nth-ancestor` ->
+    /// `:upward`, comma lists containing procedural/action operators are
+    /// split, and rules built on operators that are dead in Brave (`:others`,
+    /// `:matches-media`, `:-abp-properties`, `:matches-prop`, `:watch-attr`,
+    /// empty `:remove-attr()`/`:remove-class()`/`:style()`) are dropped.
+    #[serde(default = "default_cosmetic_compat")]
+    pub cosmetic_compat: bool,
 }
 
 impl Default for FilterConfig {
@@ -87,6 +95,7 @@ impl Default for FilterConfig {
         Self {
             scriptlets: default_scriptlets_enabled(),
             redirect_allowlist: default_redirect_allowlist(),
+            cosmetic_compat: default_cosmetic_compat(),
         }
     }
 }
@@ -141,6 +150,10 @@ fn default_output_file() -> String {
 }
 
 fn default_scriptlets_enabled() -> bool {
+    true
+}
+
+fn default_cosmetic_compat() -> bool {
     true
 }
 

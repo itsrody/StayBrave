@@ -1,5 +1,6 @@
 pub mod analyzer;
 pub mod config;
+pub mod cosmetic;
 pub mod fetcher;
 pub mod filter;
 pub mod normalizer;

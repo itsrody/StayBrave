@@ -7,6 +7,7 @@ use std::collections::HashSet;
 /// Drops rules that reference functionality the Brave engine cannot execute.
 pub struct Filterer {
     pub scriptlets: bool,
+    pub cosmetic_compat: bool,
     redirect_allowlist: HashSet<String>,
 }
 
@@ -14,6 +15,7 @@ impl Filterer {
     pub fn new(cfg: &FilterConfig) -> Self {
         Self {
             scriptlets: cfg.scriptlets,
+            cosmetic_compat: cfg.cosmetic_compat,
             redirect_allowlist: cfg.redirect_allowlist.iter().cloned().collect(),
         }
     }
@@ -94,6 +96,7 @@ mod tests {
         let cfg = FilterConfig {
             scriptlets: false,
             redirect_allowlist: Vec::new(),
+            cosmetic_compat: true,
         };
         let f = Filterer::new(&cfg);
         let ParsedLine::Cosmetic(cf) = parse("example.com##+js(set-constant, foo)") else {

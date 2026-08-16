@@ -71,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
                     hosts_converted = stats.hosts_converted,
                     unsupported_options = stats.unsupported_options,
                     unsupported_cosmetic = stats.unsupported_cosmetic,
+                    cosmetic_transforms = stats.cosmetic_transforms,
                     "analyzed"
                 );
                 summaries.push(ListSummary {
@@ -89,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
                     hosts_converted: stats.hosts_converted,
                     unsupported_options: stats.unsupported_options,
                     unsupported_cosmetic: stats.unsupported_cosmetic,
+                    cosmetic_transforms: stats.cosmetic_transforms,
                 });
             }
             Err(e) => {
@@ -110,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
                     hosts_converted: 0,
                     unsupported_options: 0,
                     unsupported_cosmetic: 0,
+                    cosmetic_transforms: 0,
                 });
             }
         }
@@ -121,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
     let hosts_converted: u64 = summaries.iter().map(|s| s.hosts_converted).sum();
     let unsupported_options: u64 = summaries.iter().map(|s| s.unsupported_options).sum();
     let unsupported_cosmetic: u64 = summaries.iter().map(|s| s.unsupported_cosmetic).sum();
+    let cosmetic_transforms: u64 = summaries.iter().map(|s| s.cosmetic_transforms).sum();
     tracing::info!(
         sources_fetched = sources_ok,
         sources_failed,
@@ -133,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
         hosts_converted,
         unsupported_options,
         unsupported_cosmetic,
+        cosmetic_transforms,
         "optimization complete"
     );
 

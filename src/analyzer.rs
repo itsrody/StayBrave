@@ -1,3 +1,4 @@
+use crate::cosmetic;
 use crate::fetcher::FetchedList;
 use crate::filter::Filterer;
 use crate::normalizer::{normalize_hosts_line, normalize_line};
@@ -24,6 +25,9 @@ pub struct ListStats {
     /// Cosmetic rules dropped for using syntax the engine does not support
     /// (`#$#`, `#%#`, `$$`, inline scriptlets, ...).
     pub unsupported_cosmetic: u64,
+    /// Cosmetic rules rewritten or split into forms the Brave procedural
+    /// engine executes (`:contains` -> `:has-text`, comma-list splitting, ...).
+    pub cosmetic_transforms: u64,
 }
 
 #[derive(Default)]
@@ -39,6 +43,7 @@ struct AtomicListStats {
     hosts_converted: AtomicU64,
     unsupported_options: AtomicU64,
     unsupported_cosmetic: AtomicU64,
+    cosmetic_transforms: AtomicU64,
 }
 
 impl AtomicListStats {
@@ -55,6 +60,7 @@ impl AtomicListStats {
             hosts_converted: self.hosts_converted.load(Ordering::Relaxed),
             unsupported_options: self.unsupported_options.load(Ordering::Relaxed),
             unsupported_cosmetic: self.unsupported_cosmetic.load(Ordering::Relaxed),
+            cosmetic_transforms: self.cosmetic_transforms.load(Ordering::Relaxed),
         }
     }
 }
@@ -112,7 +118,33 @@ impl Analyzer {
         normalized
             .lines
             .into_iter()
-            .filter_map(|candidate| self.classify(&candidate, filterer, stats))
+            .flat_map(|candidate| self.classify_candidates(&candidate, filterer, stats))
+            .collect()
+    }
+
+    /// Run cosmetic compatibility rewriting on one candidate, then classify
+    /// every produced line.
+    fn classify_candidates(
+        &self,
+        candidate: &str,
+        filterer: &Filterer,
+        stats: &AtomicListStats,
+    ) -> Vec<String> {
+        if filterer.cosmetic_compat {
+            let transformed = cosmetic::transform(candidate);
+            if transformed.len() != 1 || transformed[0] != candidate {
+                stats.cosmetic_transforms.fetch_add(1, Ordering::Relaxed);
+                if transformed.is_empty() {
+                    stats.unsupported_cosmetic.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            return transformed
+                .into_iter()
+                .filter_map(|line| self.classify(&line, filterer, stats))
+                .collect();
+        }
+        self.classify(candidate, filterer, stats)
+            .into_iter()
             .collect()
     }
 

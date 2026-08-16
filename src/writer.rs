@@ -22,6 +22,7 @@ pub struct ListSummary {
     pub hosts_converted: u64,
     pub unsupported_options: u64,
     pub unsupported_cosmetic: u64,
+    pub cosmetic_transforms: u64,
 }
 
 pub fn write_output(
@@ -53,7 +54,7 @@ pub fn write_output(
         if s.ok {
             writeln!(
                 w,
-                "!   [ok]   {}: {} bytes (+{} included files), {} lines, {} network + {} cosmetic rules, {} empty, {} unsupported, {} invalid, {} hosts entries converted, {} scriptlets + {} redirects filtered, {} unsupported options, {} unsupported cosmetic rules",
+                "!   [ok]   {}: {} bytes (+{} included files), {} lines, {} network + {} cosmetic rules, {} empty, {} unsupported, {} invalid, {} hosts entries converted, {} scriptlets + {} redirects filtered, {} unsupported options, {} unsupported cosmetic rules, {} cosmetic rewrites",
                 s.name,
                 s.bytes.unwrap_or(0),
                 s.included_files,
@@ -67,7 +68,8 @@ pub fn write_output(
                 s.scriptlets_removed,
                 s.redirects_removed,
                 s.unsupported_options,
-                s.unsupported_cosmetic
+                s.unsupported_cosmetic,
+                s.cosmetic_transforms
             )?;
         } else {
             writeln!(w, "!   [fail] {}: fetch failed", s.name)?;
@@ -82,6 +84,7 @@ pub fn write_output(
     let total_hosts: u64 = summaries.iter().map(|s| s.hosts_converted).sum();
     let total_uopts: u64 = summaries.iter().map(|s| s.unsupported_options).sum();
     let total_ucosm: u64 = summaries.iter().map(|s| s.unsupported_cosmetic).sum();
+    let total_ctrans: u64 = summaries.iter().map(|s| s.cosmetic_transforms).sum();
     writeln!(
         w,
         "! Input rules: {} | Unique output: {} | Duplicates removed: {}",
@@ -99,8 +102,8 @@ pub fn write_output(
     )?;
     writeln!(
         w,
-        "! Normalized: {} hosts entries converted | Eliminated: {} unsupported options, {} unsupported cosmetic rules",
-        total_hosts, total_uopts, total_ucosm
+        "! Normalized: {} hosts entries converted | Eliminated: {} unsupported options, {} unsupported cosmetic rules | Rewritten: {} cosmetic rules",
+        total_hosts, total_uopts, total_ucosm, total_ctrans
     )?;
     writeln!(w, "!")?;
     writeln!(
@@ -110,6 +113,10 @@ pub fn write_output(
     writeln!(
         w,
         "! Unsupported uBO scriptlet injection and unlisted $redirect resources are removed."
+    )?;
+    writeln!(
+        w,
+        "! Procedural cosmetic rules are rewritten into forms the Brave engine executes."
     )?;
 
     for rule in &rules.rules {
