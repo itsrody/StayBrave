@@ -112,6 +112,12 @@ pub struct FilterConfig {
     /// `||host^`/`||host/path^` rule.
     #[serde(default = "default_network_optimize")]
     pub network_optimize: bool,
+    /// Cosmetic-rule cost optimizations that select the engine's fastest
+    /// delivery channel and drop only provably-covered rules. Every pass here
+    /// is independent of `cosmetic_compat`'s proofreading rewrites and can be
+    /// disabled individually. See [`CosmeticCostConfig`].
+    #[serde(default)]
+    pub cosmetic_cost: CosmeticCostConfig,
 }
 
 impl Default for FilterConfig {
@@ -121,6 +127,52 @@ impl Default for FilterConfig {
             redirect_allowlist: default_redirect_allowlist(),
             cosmetic_compat: default_cosmetic_compat(),
             network_optimize: default_network_optimize(),
+            cosmetic_cost: CosmeticCostConfig::default(),
+        }
+    }
+}
+
+/// Cosmetic-rule cost optimizations. Each pass targets the engine's cheapest
+/// delivery channel and only ever drops a rule that a kept rule strictly
+/// covers, so output never broadens blocking. Cost tiers (from cheapest to
+/// most expensive in the adblock-rust engine): a bare `.class`/`#id` token
+/// feeds `hidden_class_id_selectors`; a complex selector starting with a token
+/// feeds `complex_*_rules`; a generic non-token-led selector feeds
+/// `misc_generic_selectors` and is scanned on *every* page; procedural rules
+/// (`:has-text(...)`, `:upward(...)`, actions, ...) are JSON-evaluated per
+/// matching token.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CosmeticCostConfig {
+    /// Split pure-CSS comma lists (`.a, .b`) into individual rules. The engine
+    /// keys each cosmetic rule on its *first* token only, so `##.a, .b` hides
+    /// `.b` only when `.a` is present on the page — a correctness bug, not an
+    /// optimization. Splitting makes every selector fire independently.
+    #[serde(default = "default_split_comma_lists")]
+    pub split_comma_lists: bool,
+    /// Rewrite a selector that a kept selector strictly covers into the
+    /// cheapest form: a bare `.class`/`#id` token subsumes every complex
+    /// selector it anchors (`##.ad` covers `##div.ad`, `##.ad.x`,
+    /// `##.a .ad`, `##.ad > span`). Only provable cover is used: generic
+    /// rules never cover host-scoped ones, exceptions and procedural/
+    /// pseudo/attribute targets are opaque.
+    #[serde(default = "default_subsume_selectors")]
+    pub subsume_selectors: bool,
+    /// Subsume procedural rules: a plain hide whose scope covers a procedural
+    /// variant of the same base selector supersedes it (`##.ad` covers
+    /// `##.ad:has-text(x)`), and exact-duplicate `#@#` exceptions/pruned by
+    /// identical selector string. Unanchored procedural rules are never
+    /// dropped — only reported.
+    #[serde(default = "default_subsume_procedural")]
+    pub subsume_procedural: bool,
+}
+
+impl Default for CosmeticCostConfig {
+    fn default() -> Self {
+        Self {
+            split_comma_lists: default_split_comma_lists(),
+            subsume_selectors: default_subsume_selectors(),
+            subsume_procedural: default_subsume_procedural(),
         }
     }
 }
@@ -199,6 +251,18 @@ fn default_cosmetic_compat() -> bool {
 }
 
 fn default_network_optimize() -> bool {
+    true
+}
+
+fn default_split_comma_lists() -> bool {
+    true
+}
+
+fn default_subsume_selectors() -> bool {
+    true
+}
+
+fn default_subsume_procedural() -> bool {
     true
 }
 

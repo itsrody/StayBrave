@@ -24,6 +24,7 @@ pub struct ListSummary {
     pub unsupported_options: u64,
     pub unsupported_cosmetic: u64,
     pub cosmetic_transforms: u64,
+    pub comma_lists_split: u64,
 }
 
 pub fn write_output(
@@ -114,12 +115,13 @@ pub fn write_output(
     let total_ctrans: u64 = summaries.iter().map(|s| s.cosmetic_transforms).sum();
     writeln!(
         w,
-        "! Input rules: {} | Unique output: {} | Final output: {} | Duplicates removed: {} | Cosmetic subsumed: {} | Network subsumed: {} | Rewritten: {} | Semantic duplicates merged: {}",
+        "! Input rules: {} | Unique output: {} | Final output: {} | Duplicates removed: {} | Cosmetic subsumed: {} | Procedural subsumed: {} | Network subsumed: {} | Rewritten: {} | Semantic duplicates merged: {}",
         rules.input_rules,
         rules.unique_rules,
         rules.rules.len(),
         rules.duplicates_removed,
-        rules.cosmetic_subsumed,
+        rules.cosmetic_selectors_subsumed,
+        rules.procedural_subsumed,
         rules.network_subsumed,
         rules.rewritten,
         rules.semantic_merged
@@ -133,6 +135,16 @@ pub fn write_output(
         w,
         "! Token buckets (estimated): {} hostname-tokened rules, {} catch-all network rules (checked on every request)",
         rules.hostname_tokened, rules.catch_all_estimated
+    )?;
+    writeln!(
+        w,
+        "! Cosmetic channels: {} simple class/id, {} complex token-led, {} generic-misc, {} hostname-hide, {} hostname-unhide, {} procedural",
+        rules.simple_class_id,
+        rules.complex_token_led,
+        rules.generic_misc,
+        rules.hostname_hide,
+        rules.hostname_unhide,
+        rules.procedural
     )?;
     writeln!(
         w,

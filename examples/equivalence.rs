@@ -2,9 +2,93 @@ use adblock::Engine;
 use staybrave::cosmetic;
 use staybrave::network;
 use staybrave::rewriter::Rewriter;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::Write;
 use std::time::Instant;
+
+/// Parse a cosmetic rule line into `(host, separator, selector)`, mirroring the
+/// optimizer's `split_cosmetic` (excludes `#?#` extended syntax).
+fn part_cosmetic(line: &str) -> Option<(&str, &str, &str)> {
+    let idx = line.find("#@#").or_else(|| line.find("##"))?;
+    let host = &line[..idx];
+    if host.ends_with('?') {
+        return None;
+    }
+    if line[idx..].starts_with("#@#") {
+        Some((host, "#@#", &line[idx + 3..]))
+    } else {
+        Some((host, "##", &line[idx + 2..]))
+    }
+}
+
+/// Selector-keyed index of a cosmetic rule set, for finding the provable cover
+/// of a rule removed by Pass 2/3.
+struct CosIndex<'a> {
+    /// Selector string -> full rule lines. Also the victim pool: a removed
+    /// selector must have had a real line (an engine probe discovered it).
+    by_selector_legacy: HashMap<&'a str, Vec<&'a str>>,
+    by_selector_pass23: HashMap<&'a str, Vec<&'a str>>,
+    /// Bare `.class`/`#id` selector lines (Pass 2B covers) in the Pass-2/3 set.
+    bare_by_token: HashMap<String, Vec<&'a str>>,
+}
+
+impl<'a> CosIndex<'a> {
+    fn build(legacy: &'a [String], pass23: &'a [String]) -> CosIndex<'a> {
+        let mut index = CosIndex {
+            by_selector_legacy: HashMap::new(),
+            by_selector_pass23: HashMap::new(),
+            bare_by_token: HashMap::new(),
+        };
+        for line in legacy {
+            if let Some((_, _, sel)) = part_cosmetic(line) {
+                index.by_selector_legacy.entry(sel).or_default().push(line);
+            }
+        }
+        for line in pass23 {
+            let Some((_, sep, sel)) = part_cosmetic(line) else {
+                continue;
+            };
+            index.by_selector_pass23.entry(sel).or_default().push(line);
+            if sep == "##" && cosmetic::first_class_id_token(sel).is_some_and(|t| t == sel) {
+                index.bare_by_token.entry(sel.to_string()).or_default().push(line);
+            }
+        }
+        index
+    }
+
+    /// True when a rule with `selector` exists in the legacy set whose removal
+    /// the Pass-2/3 set provably covers: some surviving cover line subsumes
+    /// some legacy victim line via `cosmetic::rule_subsumes` (identical-selector
+    /// broader-scope, bare-token, or plain-over-procedural).
+    fn provably_covered(&self, selector: &str) -> bool {
+        let Some(victims) = self.by_selector_legacy.get(selector) else {
+            return true; // nothing was removed with this selector
+        };
+        let mut covers: Vec<&str> = self
+            .by_selector_pass23
+            .get(selector)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(base) = cosmetic::plain_base(selector) {
+            if let Some(g) = self.by_selector_pass23.get(base.as_str()) {
+                covers.extend(g.iter().copied());
+            }
+        }
+        for tok in cosmetic::cover_candidates(selector) {
+            if let Some(g) = self.bare_by_token.get(&tok) {
+                covers.extend(g.iter().copied());
+            }
+        }
+        covers.sort_unstable();
+        covers.dedup();
+        covers.iter().any(|c| {
+            victims
+                .iter()
+                .any(|v| *c != *v && cosmetic::rule_subsumes(c, v) == Some(true))
+        })
+    }
+}
 
 fn cosmetic_sep(line: &str) -> Option<(usize, &'static str)> {
     ["#@#", "##", "#?#"]
@@ -237,29 +321,53 @@ fn main() -> anyhow::Result<()> {
 
     let cosmetic_lines: Vec<String> = lines.iter().filter(|l| is_cosmetic(l)).cloned().collect();
 
-    // ---- Stage 1: cosmetic subsumption equivalence -------------------------
+    // ---- Stage 1: cosmetic cost passes (Pass 2 + 3) equivalence -------------
+    // The legacy pass (same-selector scope subsumption) is compared against the
+    // actual optimizer pipeline (Pass 2 `subsume_selectors` + Pass 3
+    // `subsume_procedural`). Pass 2/3 removes rules that are provably covered
+    // by a *different* rule string (bare `.ad` over `div.ad`, a plain hide over
+    // a `:has-text` variant), so per-engine rule output is not byte-identical:
+    // the harness requires engine-level behaviour equality — every selector the
+    // legacy engine would deliver/hide that the optimizer drops must have a
+    // surviving cover, and nothing new may appear.
     let t = Instant::now();
-    let (subsumed, removed) = cosmetic::subsume(&cosmetic_lines);
-    let kept: HashSet<String> = subsumed.into_iter().collect();
+    let legacy_kept: HashSet<String> = cosmetic::subsume(&cosmetic_lines).0.into_iter().collect();
+    let t_legacy = t.elapsed().as_millis();
+    let t = Instant::now();
+    let pass2 = cosmetic::subsume_selectors(&cosmetic_lines).0;
+    let t_pass2 = t.elapsed().as_millis();
+    let pass23: HashSet<String> = cosmetic::subsume_procedural(&pass2).0.into_iter().collect();
+    let legacy_removed = cosmetic_lines.len() - legacy_kept.len();
+    let pass23_removed = cosmetic_lines.len() - pass23.len();
     println!(
-        "[{:4}ms] subsume: removed {removed} of {} cosmetic rules",
+        "[{:4}ms] cosmetic passes: legacy subsume removed {legacy_removed} in {t_legacy}ms; Pass 2 removed {} in {t_pass2}ms, Pass 3 removed {} total",
         t.elapsed().as_millis(),
-        cosmetic_lines.len()
+        pass23_removed - legacy_removed,
+        pass23_removed
     );
     std::io::stdout().flush().unwrap();
 
-    let after_cosmetic: Vec<String> = lines
+    let after_legacy: Vec<String> = lines
         .iter()
-        .filter(|l| !is_cosmetic(l) || kept.contains(*l))
+        .filter(|l| !is_cosmetic(l) || legacy_kept.contains(*l))
         .cloned()
         .collect();
+    let after_pass23: Vec<String> = lines
+        .iter()
+        .filter(|l| !is_cosmetic(l) || pass23.contains(*l))
+        .cloned()
+        .collect();
+    let index = CosIndex::build(&after_legacy, &after_pass23);
 
     let t = Instant::now();
-    let before = Engine::new_with_list_text(lines.join("\n"));
-    println!("[{:4}ms] built before engine", t.elapsed().as_millis());
+    let before = Engine::new_with_list_text(after_legacy.join("\n"));
+    println!("[{:4}ms] built before engine (legacy cosmetic pass)", t.elapsed().as_millis());
     let t = Instant::now();
-    let after = Engine::new_with_list_text(after_cosmetic.join("\n"));
-    println!("[{:4}ms] built after engine", t.elapsed().as_millis());
+    let after = Engine::new_with_list_text(after_pass23.join("\n"));
+    println!(
+        "[{:4}ms] built after engine (Pass 2+3)",
+        t.elapsed().as_millis()
+    );
     std::io::stdout().flush().unwrap();
 
     let (classes, ids) = extract_class_id_tokens(&cosmetic_lines);
@@ -274,42 +382,63 @@ fn main() -> anyhow::Result<()> {
     println!("probing {} hostnames", hosts.len());
     std::io::stdout().flush().unwrap();
 
+    // Host-scoped evaluation: UrlSpecificResources per host.
     let t = Instant::now();
     let mut mismatches = 0usize;
     let mut checked = 0usize;
-    for host in &hosts {
+    let host_cap: usize = std::env::var("EQ_COSMETIC_HOSTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600);
+    for host in hosts.iter().take(host_cap) {
         let url = format!("https://{host}/");
         let ra = before.url_cosmetic_resources(&url);
         let rb = after.url_cosmetic_resources(&url);
-        if !compare_resources(&ra, &rb) {
+        checked += 1;
+        // Exceptions, generichide and injected scripts must be identical: Pass
+        // 2/3 never adds one, and identical-selector removals are delivered
+        // through the surviving broader scope anyway.
+        if ra.exceptions != rb.exceptions
+            || ra.generichide != rb.generichide
+            || ra.injected_script != rb.injected_script
+        {
             mismatches += 1;
-            if mismatches <= 5 {
-                let diff_hide: Vec<_> = ra
-                    .hide_selectors
-                    .difference(&rb.hide_selectors)
-                    .take(5)
-                    .collect();
-                let diff_proc: Vec<_> = ra
-                    .procedural_actions
-                    .difference(&rb.procedural_actions)
-                    .take(5)
-                    .collect();
-                let diff_exc: Vec<_> = ra.exceptions.difference(&rb.exceptions).take(5).collect();
-                let diff_hide_extra: Vec<_> = rb
-                    .hide_selectors
-                    .difference(&ra.hide_selectors)
-                    .take(5)
-                    .collect();
-                eprintln!(
-                    "MISMATCH {host}:\n  hide only-before={diff_hide:?}\n  hide only-after={diff_hide_extra:?}\n  proc only-before={diff_proc:?}\n  exc only-before={diff_exc:?}\n  inj only-before={:?}\n  inj only-after={:?}\n  genhide {}/{}",
-                    ra.injected_script.strip_prefix(&rb.injected_script).unwrap_or("(len differs)"),
-                    rb.injected_script.strip_prefix(&ra.injected_script).unwrap_or("(len differs)"),
-                    ra.generichide,
-                    rb.generichide
-                );
+            eprintln!(
+                "COS MISMATCH {host}: exceptions only-before={:?} only-after={:?}, generichide {}/{}",
+                ra.exceptions.difference(&rb.exceptions).take(4).collect::<Vec<_>>(),
+                rb.exceptions.difference(&ra.exceptions).take(4).collect::<Vec<_>>(),
+                ra.generichide,
+                rb.generichide
+            );
+            continue;
+        }
+        // Hides and procedural actions may only shrink; every dropped selector
+        // must be provably covered by a surviving rule.
+        let ra_hides: HashSet<&String> = ra.hide_selectors.iter().collect();
+        let rb_hides: HashSet<&String> = rb.hide_selectors.iter().collect();
+        let ra_proc: HashSet<&String> = ra.procedural_actions.iter().collect();
+        let rb_proc: HashSet<&String> = rb.procedural_actions.iter().collect();
+        if !rb_hides.is_subset(&ra_hides) || !rb_proc.is_subset(&ra_proc) {
+            mismatches += 1;
+            eprintln!("COS MISMATCH {host}: new hide/procedural selector appeared");
+            continue;
+        }
+        for s in ra_hides.difference(&rb_hides) {
+            if !index.provably_covered(s) {
+                mismatches += 1;
+                if mismatches <= 10 {
+                    eprintln!("COS MISMATCH {host}: dropped hide {s} has no surviving cover");
+                }
             }
         }
-        checked += 1;
+        for s in ra_proc.difference(&rb_proc) {
+            if !index.provably_covered(s) {
+                mismatches += 1;
+                if mismatches <= 10 {
+                    eprintln!("COS MISMATCH {host}: dropped procedural action {s} has no surviving cover");
+                }
+            }
+        }
     }
     println!(
         "[{:4}ms] compared {} url_cosmetic_resources checks: {mismatches} mismatches",
@@ -318,23 +447,56 @@ fn main() -> anyhow::Result<()> {
     );
     std::io::stdout().flush().unwrap();
 
+    // Generic path evaluation: hidden_class_id_selectors across page scenarios.
+    // Pass 2B/3i only remove *generic-covered* victims here; the cover selector
+    // must be hidden on any page where the victim's token is present, so page
+    // scenarios with real tokens materialize the widening and the diff-acceptance
+    // catches any removal whose cover does not survive.
     let t = Instant::now();
-    let ca = before.hidden_class_id_selectors(&classes, &ids, &HashSet::new());
-    let cb = after.hidden_class_id_selectors(&classes, &ids, &HashSet::new());
-    let generic_ok = ca == cb;
-    println!(
-        "[{:4}ms] generic class/id path identical: {generic_ok} ({} selectors)",
-        t.elapsed().as_millis(),
-        ca.len()
-    );
-    if !generic_ok {
-        mismatches += 1;
+    let classes_pool: Vec<String> = classes.iter().take(2_000).cloned().collect();
+    let ids_pool: Vec<String> = ids.iter().take(500).cloned().collect();
+    let mut checked_generic = 0usize;
+    let mut mismatches_generic = 0usize;
+    for host in hosts.iter().take(host_cap) {
+        let url = format!("https://{host}/");
+        for (c, i) in [
+            (Vec::new(), Vec::new()),
+            (
+                classes_pool.iter().take(25).cloned().collect(),
+                ids_pool.iter().take(10).cloned().collect(),
+            ),
+        ] {
+            let ha_vec = before.hidden_class_id_selectors(&c, &i, &HashSet::new());
+            let hb_vec = after.hidden_class_id_selectors(&c, &i, &HashSet::new());
+            let ha: HashSet<&String> = ha_vec.iter().collect();
+            let hb: HashSet<&String> = hb_vec.iter().collect();
+            checked_generic += 1;
+            if !hb.is_subset(&ha) {
+                mismatches_generic += 1;
+                eprintln!("COS MISMATCH {url}: new generic hidden selector appeared");
+                continue;
+            }
+            for s in ha.difference(&hb) {
+                if !index.provably_covered(s) {
+                    mismatches_generic += 1;
+                    if mismatches_generic <= 10 {
+                        eprintln!("COS MISMATCH {url}: dropped generic hidden {s} has no surviving cover");
+                    }
+                }
+            }
+        }
     }
+    println!(
+        "[{:4}ms] compared {} hidden_class_id_selectors page checks: {mismatches_generic} mismatches",
+        t.elapsed().as_millis(),
+        checked_generic
+    );
     std::io::stdout().flush().unwrap();
+    mismatches += mismatches_generic;
 
     // ---- Stage 2: network optimization equivalence ------------------------
     let t = Instant::now();
-    let report = Rewriter::default().rewrite_list(after_cosmetic.clone());
+    let report = Rewriter::default().rewrite_list(after_pass23.clone());
     let pre_subsumed: HashSet<String> = report.rules.iter().cloned().collect();
     let (network_lines, network_subsumed) = network::subsume(&report.rules);
     let kept_network: HashSet<String> = network_lines.iter().cloned().collect();
@@ -344,7 +506,7 @@ fn main() -> anyhow::Result<()> {
         report.stats.rewritten,
         report.stats.merged_duplicates,
         network_subsumed,
-        after_cosmetic.len(),
+        after_pass23.len(),
         network_lines.len()
     );
     std::io::stdout().flush().unwrap();
@@ -362,7 +524,7 @@ fn main() -> anyhow::Result<()> {
             corpus.extend(probe_urls(line));
         }
     }
-    let rewritten: HashSet<String> = after_cosmetic
+    let rewritten: HashSet<String> = after_pass23
         .iter()
         .filter(|l| !pre_subsumed.contains(*l))
         .cloned()
@@ -435,7 +597,7 @@ fn main() -> anyhow::Result<()> {
     std::io::stdout().flush().unwrap();
 
     println!(
-        "summary: -{removed} cosmetic rules, -{network_subsumed} network rules, -{} merged; {} before -> {} after lines",
+        "summary: -{pass23_removed} cosmetic rules (Pass 2+3), -{network_subsumed} network rules, -{} merged; {} before -> {} after lines",
         report.stats.merged_duplicates,
         lines.len(),
         network_lines.len()

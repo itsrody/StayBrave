@@ -186,6 +186,128 @@ fn has_op(selector: &str, ops: &[&str]) -> bool {
     ops.iter().any(|op| selector.contains(op))
 }
 
+/// Parse a cosmetic rule line into `(host, separator, selector)`, like the
+/// optimizer's `split_cosmetic`. `#?#` extended-CSS syntax is excluded.
+fn cosmetic_parts(line: &str) -> Option<(&str, &str, &str)> {
+    let idx = line.find("#@#").or_else(|| line.find("##"))?;
+    let host = &line[..idx];
+    if host.ends_with('?') {
+        return None;
+    }
+    if line[idx..].starts_with("#@#") {
+        Some((host, "#@#", &line[idx + 3..]))
+    } else {
+        Some((host, "##", &line[idx + 2..]))
+    }
+}
+
+/// Fail on any surviving cosmetic rule the transform layer would rewrite: an
+/// unsplit pure-CSS comma list or a `:min-text-length(0)` operator. The
+/// pipeline must already be a fixpoint under `transform` (default options).
+fn check_transform_fixpoint(lines: &[String]) -> Vec<String> {
+    let mut bad = Vec::new();
+    for line in lines {
+        if line.starts_with('!') || cosmetic_parts(line).is_none() {
+            continue;
+        }
+        let out = cosmetic::transform(line, &cosmetic::TransformOptions::default());
+        if out.lines.len() != 1 || out.lines[0] != *line {
+            bad.push(format!("pending transform: {line}"));
+        }
+    }
+    bad
+}
+
+/// Sampling size for the "dominated survivor" gate. Cosmetic rules number in
+/// the tens of thousands; probing every rule would double the optimizer's
+/// cost, so a strided sample is checked against the indexed rules.
+const DOMINATED_SAMPLE: usize = 8_000;
+
+/// Fail on any sampled survivor that another *surviving* rule provably
+/// subsumes under Pass 2/3 (`subsume_selectors` + `subsume_procedural`). The
+/// passes run to a fixpoint and index their candidates by selector string, so
+/// this gate mirrors their exact semantics via `cosmetic::rule_subsumes`.
+fn check_cosmetic_dominated(lines: &[String]) -> (usize, Vec<String>) {
+    let mut by_selector: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut by_bare: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut cosmetic = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.starts_with('!') {
+            continue;
+        }
+        let Some((_, sep, sel)) = cosmetic_parts(line) else {
+            continue;
+        };
+        cosmetic.push(i);
+        by_selector.entry(sel).or_default().push(i);
+        if sep == "##"
+            && cosmetic::first_class_id_token(sel).is_some_and(|t| t == sel)
+        {
+            by_bare.entry(sel.to_string()).or_default().push(i);
+        }
+    }
+
+    let step = if cosmetic.len() > DOMINATED_SAMPLE {
+        cosmetic.len() / DOMINATED_SAMPLE
+    } else {
+        1
+    };
+    let mut examples = Vec::new();
+    let mut dominated = 0usize;
+    for &vi in cosmetic.iter().step_by(step) {
+        let vline = &lines[vi];
+        let vsep = cosmetic_parts(vline).unwrap().1;
+        let vsel = cosmetic_parts(vline).unwrap().2;
+        let vprocedural = cosmetic::is_procedural(vsel);
+
+        let mut candidates = Vec::new();
+        if let Some(group) = by_selector.get(vsel) {
+            for &idx in group {
+                if idx != vi {
+                    candidates.push(idx);
+                }
+            }
+        }
+        if vprocedural {
+            if vsep == "##" {
+                if let Some(base) = cosmetic::plain_base(vsel) {
+                    if let Some(group) = by_selector.get(base.as_str()) {
+                        candidates.extend(group.iter().copied());
+                    }
+                }
+            }
+        } else if vsep == "##" {
+            for tok in cosmetic::cover_candidates(vsel) {
+                if let Some(group) = by_bare.get(&tok) {
+                    for &idx in group {
+                        if idx != vi {
+                            candidates.push(idx);
+                        }
+                    }
+                }
+            }
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        let any = candidates
+            .iter()
+            .any(|&ci| cosmetic::rule_subsumes(&lines[ci], vline) == Some(true));
+        if any {
+            dominated += 1;
+            if examples.len() < 20 {
+                examples.push(match candidates
+                    .iter()
+                    .find(|&&ci| cosmetic::rule_subsumes(&lines[ci], vline) == Some(true))
+                {
+                    Some(&ci) => format!("dominated by {}: {}", lines[ci], vline),
+                    None => vline.clone(),
+                });
+            }
+        }
+    }
+    (dominated, examples)
+}
+
 /// Find cosmetic rules that survived with a dead operator or an unsplit comma
 /// list containing a procedural/action operator.
 fn find_cosmetic_contamination(lines: &[String]) -> Vec<String> {
@@ -244,6 +366,30 @@ fn main() -> anyhow::Result<()> {
         contamination.len()
     );
     for c in contamination.iter().take(20) {
+        eprintln!("  {c}");
+    }
+    std::io::stdout().flush().unwrap();
+
+    let t = Instant::now();
+    let pending_transforms = check_transform_fixpoint(&lines);
+    println!(
+        "[{:4}ms] transform fixpoint gate: {} rules the transform layer would still rewrite (unsplit pure-CSS comma lists, `:min-text-length(0)`)",
+        t.elapsed().as_millis(),
+        pending_transforms.len()
+    );
+    for c in pending_transforms.iter().take(20) {
+        eprintln!("  {c}");
+    }
+    std::io::stdout().flush().unwrap();
+
+    let t = Instant::now();
+    let (dominated_count, dominated) = check_cosmetic_dominated(&lines);
+    println!(
+        "[{:4}ms] subsumption fixpoint gate: {} sampled survivors dominated by another surviving rule (Pass 2/3)",
+        t.elapsed().as_millis(),
+        dominated_count
+    );
+    for c in dominated.iter() {
         eprintln!("  {c}");
     }
     std::io::stdout().flush().unwrap();
@@ -393,7 +539,11 @@ fn main() -> anyhow::Result<()> {
         std::io::stdout().flush().unwrap();
     }
 
-    let ok = dead == 0 && contamination.is_empty() && doc_fail == 0;
+    let ok = dead == 0
+        && contamination.is_empty()
+        && pending_transforms.is_empty()
+        && dominated_count == 0
+        && doc_fail == 0;
     println!("VERIFY {}", if ok { "PASS" } else { "FAIL" });
     if !ok {
         std::process::exit(1);

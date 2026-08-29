@@ -52,20 +52,100 @@ const DROP_OPS: &[&str] = &[
     ":matches-prop(",
 ];
 
+/// Tunables for Pass 1 (format rewriting). Currently just whether pure-CSS
+/// comma lists are split; kept as a struct so future format rewrites can be
+/// gated independently without churning call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransformOptions {
+    /// Split pure-CSS comma lists (`.a, .b`) into individual selectors. The
+    /// engine keys a cosmetic rule on its *first* token only, so an un-split
+    /// `##.a, .b` hides `.b` only when `.a` is present on the page; splitting
+    /// is a correctness fix, not an optimization.
+    pub split_comma_lists: bool,
+}
+
+impl Default for TransformOptions {
+    fn default() -> Self {
+        Self {
+            split_comma_lists: true,
+        }
+    }
+}
+
+/// Result of transforming one cosmetic rule line.
+#[derive(Debug)]
+pub struct TransformOutput {
+    pub lines: Vec<String>,
+    /// True when a cosmetic rule was split purely on top-level commas with no
+    /// procedural/action operators in any piece (the `cosmetic_transforms`
+    /// counter tracks the procedural proofreading path).
+    pub comma_lists_split: bool,
+}
+
 /// Transform one cosmetic rule line, returning every rule it contributes.
 /// Non-cosmetic lines pass through unchanged.
-pub fn transform(line: &str) -> Vec<String> {
+pub fn transform(line: &str, opts: &TransformOptions) -> TransformOutput {
     let Some((host, sep, selector)) = split_cosmetic(line) else {
-        return vec![line.to_string()];
+        return TransformOutput {
+            lines: vec![line.to_string()],
+            comma_lists_split: false,
+        };
     };
     if !is_procedural(selector) {
-        return vec![line.to_string()];
+        return split_pure_css(line, host, sep, selector, opts);
     }
-    split_top_level(selector, ',')
+    let lines = split_top_level(selector, ',')
         .into_iter()
         .filter_map(|piece| transform_piece(&piece))
         .map(|selector| format!("{host}{sep}{selector}"))
-        .collect()
+        .collect();
+    TransformOutput {
+        lines,
+        comma_lists_split: false,
+    }
+}
+
+/// Split a non-procedural comma list into individual rules. Returns the input
+/// line unchanged when splitting yields fewer than two meaningful selectors.
+fn split_pure_css(
+    line: &str,
+    host: &str,
+    sep: &str,
+    selector: &str,
+    opts: &TransformOptions,
+) -> TransformOutput {
+    if !opts.split_comma_lists {
+        return TransformOutput {
+            lines: vec![line.to_string()],
+            comma_lists_split: false,
+        };
+    }
+    let pieces = split_top_level(selector, ',');
+    if pieces.len() <= 1 {
+        return TransformOutput {
+            lines: vec![line.to_string()],
+            comma_lists_split: false,
+        };
+    }
+    let mut lines = Vec::new();
+    for piece in pieces {
+        let piece = piece.trim();
+        if piece.is_empty() {
+            continue;
+        }
+        lines.push(format!("{host}{sep}{piece}"));
+    }
+    if lines.len() > 1 {
+        TransformOutput {
+            lines,
+            comma_lists_split: true,
+        }
+    } else {
+        TransformOutput {
+            lines: vec![line.to_string()],
+            comma_lists_split: false,
+        }
+    }
 }
 
 /// Split `host##selector` into its parts. Returns `None` for non-cosmetic
@@ -85,7 +165,7 @@ fn split_cosmetic(line: &str) -> Option<(&str, &str, &str)> {
 
 /// True when the selector contains any operator that needs attention
 /// (procedural, action, or a dead operator).
-fn is_procedural(selector: &str) -> bool {
+pub fn is_procedural(selector: &str) -> bool {
     contains_any(selector, EXECUTABLE_OPS)
         || contains_any(selector, DROP_OPS)
         || selector.contains(":contains(")
@@ -104,6 +184,9 @@ fn transform_piece(piece: &str) -> Option<String> {
     if sel.is_empty() {
         return Some(sel);
     }
+
+    // `:min-text-length(0)` is inert (every element has text length >= 0).
+    sel = strip_zero_min_text_length(&sel);
 
     // Dead operators with a live equivalent: rewrite the argument verbatim.
     sel = rewrite_op(&sel, ":contains(", ":has-text(")?;
@@ -159,6 +242,27 @@ fn strip_op(selector: &str, op: &str) -> Option<String> {
     out.push_str(&selector[..start]);
     out.push_str(&selector[arg_end + 1..]);
     Some(out)
+}
+
+/// Remove every `:min-text-length(0)` — the engine requires a text length of
+/// at least 0, which every element satisfies, so the operator is inert. Stops
+/// at the first non-zero argument (a real threshold keeps the rule meaningful).
+fn strip_zero_min_text_length(selector: &str) -> String {
+    const OP: &str = ":min-text-length(";
+    let mut sel = selector.to_string();
+    loop {
+        let Some(start) = sel.find(OP) else {
+            return sel;
+        };
+        let arg_start = start + OP.len();
+        let Some(arg_end) = find_closing_paren(&sel, arg_start) else {
+            return sel;
+        };
+        if &sel[arg_start..arg_end] != "0" {
+            return sel;
+        }
+        sel.replace_range(start..arg_end + 1, "");
+    }
 }
 
 /// Index just past the `)` matching the `(` opened at `open`.
@@ -265,6 +369,123 @@ fn split_top_level(s: &str, sep: char) -> Vec<String> {
 
 fn contains_any(s: &str, ops: &[&str]) -> bool {
     ops.iter().any(|op| s.contains(op))
+}
+
+/// The delivery channel the adblock-rust engine assigns a cosmetic rule,
+/// mirroring `CosmeticFilterCacheBuilder::add_filter` for adblock-rust 0.13
+/// (raw CSS selectors, no `css-validation` canonicalization).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Channel {
+    /// Generic rule whose selector is exactly `.foo`/`#foo` —
+    /// `simple_class_rules`/`simple_id_rules`. Cheapest channel.
+    SimpleClassId,
+    /// Generic token-led compound rule — `complex_class_rules`/
+    /// `complex_id_rules`.
+    ComplexTokenLed,
+    /// Generic rule that is not token-led — `misc_generic_selectors`. Scanned
+    /// on *every* page. Heavy.
+    GenericMisc,
+    /// Host-scoped plain-CSS hide — `hostname_hide`, resolved per navigation.
+    HostnameHide,
+    /// Host-scoped `#@#` exception — prunes by exact selector string.
+    HostnameUnhide,
+    /// Host-scoped procedural/action rule — JSON-evaluated per matching token.
+    /// The engine rejects generic procedural rules at parse time
+    /// (`GenericAction`), so every surviving procedural rule is host-scoped.
+    Procedural,
+}
+
+/// Per-channel counts of the surviving cosmetic rules (report only; no rules
+/// are dropped by the classifier).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChannelCounts {
+    pub simple_class_id: u64,
+    pub complex_token_led: u64,
+    pub generic_misc: u64,
+    pub hostname_hide: u64,
+    pub hostname_unhide: u64,
+    pub procedural: u64,
+}
+
+/// Classify one cosmetic rule line into its engine delivery channel. Returns
+/// `None` for non-cosmetic lines (network rules, `#?#` extended-CSS syntax,
+/// comments).
+pub fn classify_channel(line: &str) -> Option<Channel> {
+    let (host, sep, selector) = split_cosmetic(line)?;
+    if is_procedural(selector) {
+        return Some(Channel::Procedural);
+    }
+    // Negation-only locations (`~host`) carry no positive hostname constraint:
+    // the engine materializes no host-scoped hide, only a hidden generic rule
+    // plus an exact-string exception for the negated hosts. So the selector is
+    // delivered through the generic channel on every page.
+    let has_positive = host
+        .split(',')
+        .map(str::trim)
+        .any(|p| !p.is_empty() && !p.starts_with('~'));
+    if host.is_empty() || !has_positive {
+        return classify_generic(selector);
+    }
+    // Host-scoped rules live in the hostname maps regardless of selector
+    // shape. Exception rules land in the unhide channel. `#?#` never reaches
+    // here (`split_cosmetic` rejects it).
+    if sep == "#@#" {
+        return Some(Channel::HostnameUnhide);
+    }
+    Some(Channel::HostnameHide)
+}
+
+/// Classify a generic (no positive hostname) selector, following
+/// `CosmeticFilterCacheBuilder::add_generic_filter`: `.`/`#`-led selectors
+/// whose first class/id token covers the whole selector are simple; a longer
+/// selector is complex token-led; anything else is generic-misc.
+fn classify_generic(selector: &str) -> Option<Channel> {
+    let Some(token) = first_class_id_token(selector) else {
+        return Some(Channel::GenericMisc);
+    };
+    if token == selector {
+        Some(Channel::SimpleClassId)
+    } else {
+        Some(Channel::ComplexTokenLed)
+    }
+}
+
+/// First class/id token of a selector, mirroring the engine's
+/// `key_from_selector` regex `^[#.][\w\\-]+` for the practical token alphabet
+/// (alphanumerics plus `_`, `-`, and `\`). Escaped and esoteric class names
+/// are classified per the same syntax; only the raw token prefix matters here.
+pub fn first_class_id_token(selector: &str) -> Option<&str> {
+    let mut chars = selector.char_indices();
+    let (_, first) = chars.next()?;
+    if first != '.' && first != '#' {
+        return None;
+    }
+    let mut end = first.len_utf8();
+    for (i, c) in chars {
+        if c == '\\' || c == '-' || c == '_' || c.is_alphanumeric() {
+            end = i + c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    Some(&selector[..end])
+}
+
+/// Count the surviving cosmetic rules by engine delivery channel.
+pub fn channel_counts(lines: &[String]) -> ChannelCounts {
+    let mut counts = ChannelCounts::default();
+    for line in lines {
+        match classify_channel(line) {
+            Some(Channel::SimpleClassId) => counts.simple_class_id += 1,
+            Some(Channel::ComplexTokenLed) => counts.complex_token_led += 1,
+            Some(Channel::GenericMisc) => counts.generic_misc += 1,
+            Some(Channel::HostnameHide) => counts.hostname_hide += 1,
+            Some(Channel::HostnameUnhide) => counts.hostname_unhide += 1,
+            Some(Channel::Procedural) => counts.procedural += 1,
+            None => {}
+        }
+    }
+    counts
 }
 
 /// A positive location token of a host-scoped cosmetic rule: either a plain
@@ -503,9 +724,714 @@ pub fn subsume(lines: &[String]) -> (Vec<String>, u64) {
     (kept, removed_count)
 }
 
+/// Combinator joining two top-level compounds of a selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Combinator {
+    /// Start of selector, or the descendant combinator (whitespace).
+    NoneOrDescendant,
+    /// `>` child combinator.
+    Child,
+    /// `+` / `~` sibling combinators. The preceding compound is *not* an
+    /// ancestor of the target, so hiding it does not hide the target.
+    Sibling,
+}
+
+/// Top-level (non-parenthesized) features of one selector compound.
+#[derive(Debug, Default)]
+struct CompoundFeatures {
+    classes: Vec<String>,
+    ids: Vec<String>,
+    has_attr: bool,
+    has_pseudo: bool,
+}
+
+/// Split a selector into its top-level compounds together with the combinator
+/// that joins each compound to the previous one. Parenthesized groups
+/// (`:has(...)`, `:not(...)`) and bracketed attributes are opaque atoms and
+/// are never descended into. Returns `None` when the selector has unbalanced
+/// groups or no compound at all.
+fn split_compounds(selector: &str) -> Option<Vec<(Combinator, String)>> {
+    let mut out: Vec<(Combinator, String)> = Vec::new();
+    let mut cur = String::new();
+    let mut combinator = Combinator::NoneOrDescendant;
+    let mut depth = 0isize;
+    let mut quote: Option<char> = None;
+    let mut esc = false;
+
+    for c in selector.chars() {
+        if esc {
+            esc = false;
+            cur.push(c);
+            continue;
+        }
+        if let Some(q) = quote {
+            cur.push(c);
+            if c == '\\' {
+                esc = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        if c == '\'' || c == '"' {
+            quote = Some(c);
+            cur.push(c);
+            continue;
+        }
+        if c == '(' || c == '[' {
+            depth += 1;
+            cur.push(c);
+            continue;
+        }
+        if c == ')' || c == ']' {
+            if depth == 0 {
+                return None;
+            }
+            depth -= 1;
+            cur.push(c);
+            continue;
+        }
+        if c == '>' || c == '+' || c == '~' {
+            if depth == 0 {
+                let text = cur.trim();
+                if !text.is_empty() {
+                    out.push((combinator, text.to_string()));
+                }
+                cur.clear();
+                combinator = if c == '>' { Combinator::Child } else { Combinator::Sibling };
+            } else {
+                cur.push(c);
+            }
+            continue;
+        }
+        if c.is_whitespace() && depth == 0 {
+            let text = cur.trim();
+            if !text.is_empty() {
+                out.push((combinator, text.to_string()));
+                cur.clear();
+                combinator = Combinator::NoneOrDescendant;
+            }
+            continue;
+        }
+        cur.push(c);
+    }
+    if depth != 0 || quote.is_some() {
+        return None;
+    }
+    let text = cur.trim();
+    if !text.is_empty() {
+        out.push((combinator, text.to_string()));
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+/// Extract the top-level classes/ids of a single compound, ignoring anything
+/// inside parentheses or brackets.
+fn compound_features(compound: &str) -> CompoundFeatures {
+    let mut features = CompoundFeatures::default();
+    let mut depth = 0isize;
+    let mut quote: Option<char> = None;
+    let mut esc = false;
+    let chars: Vec<char> = compound.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if esc {
+            esc = false;
+            i += 1;
+            continue;
+        }
+        if let Some(q) = quote {
+            if c == '\\' {
+                esc = true;
+            } else if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '\'' || c == '"' {
+            quote = Some(c);
+            i += 1;
+            continue;
+        }
+        if c == '(' || c == '[' {
+            if c == '[' && depth == 0 {
+                features.has_attr = true;
+            }
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if c == ')' || c == ']' {
+            if depth > 0 {
+                depth -= 1;
+            }
+            i += 1;
+            continue;
+        }
+        if depth == 0 && (c == '.' || c == '#' || c == ':') {
+            if c == ':' {
+                features.has_pseudo = true;
+                i += 1;
+                continue;
+            }
+            let start = i;
+            i += 1;
+            while i < chars.len()
+                && (chars[i] == '\\'
+                    || chars[i] == '-'
+                    || chars[i] == '_'
+                    || chars[i].is_alphanumeric())
+            {
+                i += 1;
+            }
+            let token: String = chars[start + 1..i].iter().collect();
+            if c == '.' {
+                features.classes.push(token);
+            } else {
+                features.ids.push(token);
+            }
+            continue;
+        }
+        i += 1;
+    }
+    features
+}
+
+/// Bare `##.class` / `###id` tokens that, were a bare-token hide with the same
+/// scope to exist, would prove this selector's targets are hidden:
+///
+/// * every top-level class/id of the target (rightmost) compound — the target
+///   element itself carries the token, so a bare `display: none` on it hides it
+///   directly; and
+/// * every top-level class/id of an *ancestor* compound that precedes only
+///   descendant/child combinators — hiding that ancestor hides the whole
+///   subtree it constrains.
+///
+/// Compounds reached through a sibling combinator are skipped: hiding a
+/// sibling never hides the target.
+pub fn cover_candidates(selector: &str) -> Vec<String> {
+    let Some(compounds) = split_compounds(selector) else {
+        return Vec::new();
+    };
+    let last = compounds.len() - 1;
+    let mut out = Vec::new();
+    for (i, (_combinator, text)) in compounds.iter().enumerate() {
+        if i != last && compounds[i + 1..].iter().any(|(c, _)| *c == Combinator::Sibling) {
+            continue;
+        }
+        let features = compound_features(text);
+        for class in features.classes {
+            out.push(format!(".{class}"));
+        }
+        for id in features.ids {
+            out.push(format!("#{id}"));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A cosmetic rule candidate for Pass-2 selector subsumption.
+struct SelectorRule<'a> {
+    index: usize,
+    /// `true` for `##` hides, `false` for `#@#` exceptions.
+    is_hide: bool,
+    selector: &'a str,
+    /// Positive location tokens. `Some(vec![])` when generic (all pages);
+    /// `None` when the scope is opaque (negations, non-hostname locations).
+    positives: Option<Vec<LocToken>>,
+    /// Bare `.class`/`#id` selector when this rule can act as a cover.
+    bare: Option<String>,
+}
+
+/// True when a rule scope `cover` provably matches every URL that `victim`
+/// does, under the engine's host-scoped matching semantics. Generic rules
+/// (an empty token set) match every page and only cover other generic rules —
+/// a generic rule is delivered through the generic channels, which pages can
+/// disable with `$generichide`, so it can never substitute for a host-scoped
+/// rule (hostname manifolds are immune to `$generichide`).
+fn scope_covers(
+    cover: &[LocToken],
+    victim: &[LocToken],
+    reg: &HashMap<String, Option<String>>,
+) -> bool {
+    match (cover.is_empty(), victim.is_empty()) {
+        (true, true) => true,
+        (true, false) => false, // generic never covers host-scoped (`$generichide`)
+        (false, true) => false, // a host-scoped rule never covers all pages
+        (false, false) => token_sets_cover(cover, victim, reg),
+    }
+}
+
+/// Registrable-domain cache for every host token seen across the rules.
+fn build_scope_registry(rules: &[SelectorRule]) -> HashMap<String, Option<String>> {
+    let mut reg: HashMap<String, Option<String>> = HashMap::new();
+    for token in rules
+        .iter()
+        .flat_map(|r| r.positives.iter().flatten())
+        .filter_map(|t| match t {
+            LocToken::Host(h) => Some(h.as_str()),
+            LocToken::Entity(_) => None,
+        })
+        .collect::<HashSet<_>>()
+    {
+        reg.insert(token.to_string(), registrable_domain(token));
+    }
+    reg
+}
+
+/// Pass 2: channel-aware cosmetic selector subsumption.
+///
+/// Drops a plain-CSS cosmetic rule only when a *kept* rule provably covers it:
+///
+/// * **Identical selector, broader scope** — among rules with the same
+///   selector and kind (`##` vs `#@#`), a rule whose positive location tokens
+///   are covered by another's is redundant (the engine probes the hostname
+///   label-chain, so a parent domain token matches its subdomains).
+///   Negation-only scopes are opaque and never removable.
+/// * **Bare-token selector cover** — a plain hide whose selector is exactly a
+///   `.class`/`#id` token hides every element carrying that class/id (CSS
+///   `display: none` cascades to the whole subtree). It therefore subsumes any
+///   other plain hide whose target either carries that token itself or lives
+///   inside an ancestor that carries it — `##.ad` covers `##div.ad`,
+///   `##.ad.x`, `##.a .ad`, `##.ad > span`, `##div > span.ad`; `###main`
+///   covers `##div#main`, `##.site #main`. Pseudo/attribute-led targets are
+///   opaque (they carry no class/id token).
+///
+/// Safety invariants:
+/// * Generic rules never cover host-scoped rules (`$generichide`).
+/// * Exceptions (`#@#`) and procedural rules never participate as covers or
+///   victims here (procedural rules are handled by [`subsume_procedural`]).
+/// * Sibling combinators (`+`, `~`) end an ancestor chain: hiding a sibling
+///   never hides the target.
+///
+/// Both directions are recomputed to a fixpoint, so a rule is only ever
+/// removed when a survivor it is covered by also survives.
+pub fn subsume_selectors(lines: &[String]) -> (Vec<String>, u64) {
+    let mut rules: Vec<SelectorRule> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let Some((host, sep, selector)) = split_cosmetic(line) else {
+            continue;
+        };
+        if is_procedural(selector) {
+            continue;
+        }
+        let positives = if host.is_empty() {
+            Some(Vec::new())
+        } else {
+            positive_location_tokens(host)
+        };
+        rules.push(SelectorRule {
+            index,
+            is_hide: sep == "##",
+            selector,
+            positives,
+            bare: first_class_id_token(selector)
+                .filter(|tok| *tok == selector)
+                .map(|t| t.to_string()),
+        });
+    }
+
+    let reg = build_scope_registry(&rules);
+    let mut removed: HashSet<usize> = HashSet::new();
+
+    // Index rules by their selector so the fixpoint loop is near-linear. The
+    // selector of a rule never changes, so the index is stable across
+    // iterations; `removed` is filtered at use.
+    let mut by_selector: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (idx, rule) in rules.iter().enumerate() {
+        by_selector.entry(rule.selector).or_default().push(idx);
+    }
+
+    loop {
+        let mut added = false;
+
+        // (A) identical-selector, strictly-broader-scope cover.
+        for rule in &rules {
+            if removed.contains(&rule.index) {
+                continue;
+            }
+            let Some(victim) = &rule.positives else {
+                continue;
+            };
+            for &oi in by_selector.get(rule.selector).into_iter().flatten() {
+                if removed.contains(&oi) || oi == rule.index {
+                    continue;
+                }
+                let other = &rules[oi];
+                if other.is_hide != rule.is_hide {
+                    continue;
+                }
+                let Some(cover) = &other.positives else {
+                    continue;
+                };
+                if scope_covers(cover, victim, &reg) && !scope_covers(victim, cover, &reg) {
+                    removed.insert(rule.index);
+                    added = true;
+                    break;
+                }
+            }
+        }
+
+        // (B) bare-token selector cover, Indexed by token.
+        let mut covers_by_token: HashMap<String, Vec<&SelectorRule>> = HashMap::new();
+        for rule in &rules {
+            if removed.contains(&rule.index) {
+                continue;
+            }
+            if !rule.is_hide {
+                continue;
+            }
+            let Some(crypt) = &rule.bare else {
+                continue;
+            };
+            covers_by_token.entry(crypt.clone()).or_default().push(rule);
+        }
+        for victim in &rules {
+            if removed.contains(&victim.index) || !victim.is_hide {
+                continue;
+            }
+            let Some(vp) = &victim.positives else {
+                continue;
+            };
+            for token in cover_candidates(victim.selector) {
+                let Some(covers) = covers_by_token.get(&token) else {
+                    continue;
+                };
+                if covers.iter().any(|c| {
+                    c.index != victim.index
+                        && c.positives
+                            .as_ref()
+                            .is_some_and(|cp| scope_covers(cp, vp, &reg))
+                }) {
+                    removed.insert(victim.index);
+                    added = true;
+                    break;
+                }
+            }
+        }
+
+        if !added {
+            break;
+        }
+    }
+
+    let kept: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !removed.contains(i))
+        .map(|(_, l)| l.clone())
+        .collect();
+    (kept, removed.len() as u64)
+}
+
+/// Operators stripped to compute the plain-CSS base of a procedural selector.
+/// `:upward`/`:xpath` are deliberately absent: they re-target the element the
+/// rule applies to, so they can never be exchanged for a plain hide.
+const BASE_STRIP_OPS: &[&str] = &[
+    ":has-text(",
+    ":matches-css(",
+    ":matches-attr(",
+    ":matches-path(",
+    ":min-text-length(",
+    ":style(",
+    ":remove(",
+    ":remove-attr(",
+    ":remove-class(",
+];
+
+/// Plain-CSS base of a procedural selector: the selector with every executable
+/// operator that *constrains* the target (text, CSS, attribute and path
+/// matches, plus the actions) removed. Returns `None` when the base is empty
+/// or still carries a procedural operator (`:upward`, `:xpath`, or any
+/// survived operator of a nested argument) — such a rule cannot be exchanged
+/// for a plain hide.
+pub fn plain_base(selector: &str) -> Option<String> {
+    let mut base = selector.to_string();
+    for op in BASE_STRIP_OPS {
+        loop {
+            let Some(start) = base.find(op) else {
+                break;
+            };
+            let arg_start = start + op.len();
+            let arg_end = find_closing_paren(&base, arg_start)?;
+            base.replace_range(start..arg_end + 1, "");
+        }
+    }
+    let base = base.trim();
+    if base.is_empty() || is_procedural(base) {
+        return None;
+    }
+    Some(base.to_string())
+}
+
+/// A cosmetic rule candidate for Pass-3 procedural subsumption.
+struct ProceduralRule<'a> {
+    index: usize,
+    is_hide: bool,
+    selector: &'a str,
+    /// True when the selector still carries a procedural/action operator.
+    procedural: bool,
+    positives: Option<Vec<LocToken>>,
+    /// Plain-CSS base for `##` hides that `[`plain_base`] could compute.
+    base: Option<String>,
+}
+
+/// Pass 3: procedural rule subsumption.
+///
+/// Two provable drops:
+///
+/// * **Plain hide over procedural variant** — a procedural hide whose plain-CSS
+///   base (all constraining/action operators stripped) is exactly matched by a
+///   plain hide at an equal-or-broader scope is redundant: the plain hide
+///   already `display: none`s that element (and every element the procedural
+///   rule would have selected), so the procedural rule adds nothing.
+///   `##.ad` covers `##.ad:has-text(x)`. Rules using `:upward`/`:xpath` never
+///   participate (they re-target the element).
+/// * **Identical procedural selector, broader scope** — the engine stores
+///   host-scoped procedural rules as JSON keyed by hostname token, which is
+///   probed across the label chain; a narrower-scope duplicate is redundant.
+///
+/// Exceptions (`#@#`) never participate in the plain-over-procedural direction
+/// (the engine's exceptions are exact-selector-string prunes, so a `#@#.ad`
+/// does not un-hide `.ad:has-text(x)`); identical-exception scope cover is
+/// still applied. Generic rules are never covers (`$generichide`), and a
+/// procedural rule is *never* dropped simply because an unanchored variant
+/// exists — the unanchored rules are only reported by [`channel_counts`].
+pub fn subsume_procedural(lines: &[String]) -> (Vec<String>, u64) {
+    let mut rules: Vec<ProceduralRule> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let Some((host, sep, selector)) = split_cosmetic(line) else {
+            continue;
+        };
+        let positives = if host.is_empty() {
+            Some(Vec::new())
+        } else {
+            positive_location_tokens(host)
+        };
+        rules.push(ProceduralRule {
+            index,
+            is_hide: sep == "##",
+            selector,
+            procedural: is_procedural(selector),
+            positives,
+            base: if sep == "##" && is_procedural(selector) {
+                plain_base(selector)
+            } else {
+                None
+            },
+        });
+    }
+
+    let reg = build_scope_registry_procedural(&rules);
+    let mut removed: HashSet<usize> = HashSet::new();
+
+    // Indexes built once per fixpoint call; rules never mutate, `removed` is
+    // filtered at use.
+    let mut plain_by_selector: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut by_selector: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (idx, rule) in rules.iter().enumerate() {
+        by_selector.entry(rule.selector).or_default().push(idx);
+        if rule.is_hide && !rule.procedural {
+            plain_by_selector.entry(rule.selector).or_default().push(idx);
+        }
+    }
+
+    loop {
+        let mut added = false;
+
+        // (i) plain hide over procedural variant: with the same plain-CSS
+        // base at an equal-or-broader scope, the plain hide already hides the
+        // element (and every element the procedural rule would select).
+        for victim in &rules {
+            if removed.contains(&victim.index) || !victim.is_hide {
+                continue;
+            }
+            let (Some(vp), Some(base)) = (&victim.positives, &victim.base) else {
+                continue;
+            };
+            for &oi in plain_by_selector.get(base.as_str()).into_iter().flatten() {
+                if removed.contains(&oi) || oi == victim.index {
+                    continue;
+                }
+                let other = &rules[oi];
+                if let Some(cp) = &other.positives {
+                    if scope_covers(cp, vp, &reg) {
+                        removed.insert(victim.index);
+                        added = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // (ii) identical procedural selector, broader scope (JSON is keyed by
+        // hostname token, probed across the label chain).
+        for victim in &rules {
+            if removed.contains(&victim.index) {
+                continue;
+            }
+            let Some(vp) = &victim.positives else {
+                continue;
+            };
+            for &oi in by_selector.get(victim.selector).into_iter().flatten() {
+                if removed.contains(&oi) || oi == victim.index {
+                    continue;
+                }
+                let other = &rules[oi];
+                if !other.procedural || !victim.procedural {
+                    continue;
+                }
+                if other.is_hide != victim.is_hide {
+                    continue;
+                }
+                let Some(cp) = &other.positives else {
+                    continue;
+                };
+                if scope_covers(cp, vp, &reg) && !scope_covers(vp, cp, &reg) {
+                    removed.insert(victim.index);
+                    added = true;
+                    break;
+                }
+            }
+        }
+
+        if !added {
+            break;
+        }
+    }
+
+    let kept: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !removed.contains(i))
+        .map(|(_, l)| l.clone())
+        .collect();
+    (kept, removed.len() as u64)
+}
+
+/// Registrable-domain cache for the host tokens of procedural rules.
+fn build_scope_registry_procedural(rules: &[ProceduralRule]) -> HashMap<String, Option<String>> {
+    let mut reg: HashMap<String, Option<String>> = HashMap::new();
+    for token in rules
+        .iter()
+        .flat_map(|r| r.positives.iter().flatten())
+        .filter_map(|t| match t {
+            LocToken::Host(h) => Some(h.as_str()),
+            LocToken::Entity(_) => None,
+        })
+        .collect::<HashSet<_>>()
+    {
+        reg.insert(token.to_string(), registrable_domain(token));
+    }
+    reg
+}
+
+/// Registrable-domain registry for the host tokens of two isolated rules.
+fn single_scope_registry(cover: &[LocToken], victim: &[LocToken]) -> HashMap<String, Option<String>> {
+    let mut reg: HashMap<String, Option<String>> = HashMap::new();
+    for token in cover.iter().chain(victim.iter()) {
+        if let LocToken::Host(h) = token {
+            reg.entry(h.clone()).or_insert_with(|| registrable_domain(h));
+        }
+    }
+    reg
+}
+
+/// Public domination probe for the verifier: `true` when rule line `cover`
+/// provably subsumes rule line `victim` under Pass 2 (`subsume_selectors`) and
+/// Pass 3 (`subsume_procedural`). Returns `None` when either line is not a
+/// cosmetic rule the passes consider (network rules, `#?#` extended syntax,
+/// or an opaque scope).
+///
+/// Because the passes run to a fixpoint, a survivor of the final output that
+/// has any surviving cover is a genuine pipeline bug: the passes would have
+/// removed it, so the output is not in canonical form.
+pub fn rule_subsumes(cover: &str, victim: &str) -> Option<bool> {
+    let (ch, csep, csel) = split_cosmetic(cover)?;
+    let (vh, vsep, vsel) = split_cosmetic(victim)?;
+    let cpos = if ch.is_empty() {
+        Some(Vec::new())
+    } else {
+        positive_location_tokens(ch)
+    }?;
+    let vpos = if vh.is_empty() {
+        Some(Vec::new())
+    } else {
+        positive_location_tokens(vh)
+    }?;
+    let ckind = csep == "##";
+    let vkind = vsep == "##";
+    let cprocedural = is_procedural(csel);
+    let vprocedural = is_procedural(vsel);
+
+    let subsumed = if !vprocedural {
+        if cprocedural {
+            false
+        } else {
+            let reg = single_scope_registry(&cpos, &vpos);
+            // Pass 2 (A): identical selector, same kind, strictly-broader scope.
+            let identical_broader = ckind == vkind
+                && csel == vsel
+                && scope_covers(&cpos, &vpos, &reg)
+                && !scope_covers(&vpos, &cpos, &reg);
+            // Pass 2 (B): bare class/id hide over a descendant-class hide.
+            let bare_cover = ckind
+                && vkind
+                && first_class_id_token(csel)
+                    .is_some_and(|tok| tok == csel)
+                && cover_candidates(vsel)
+                    .iter()
+                    .any(|tok| tok == first_class_id_token(csel).unwrap())
+                && scope_covers(&cpos, &vpos, &reg);
+            identical_broader || bare_cover
+        }
+    } else {
+        let reg = single_scope_registry(&cpos, &vpos);
+        // Pass 3 (i): a plain hide with the same plain-CSS base at an
+        // equal-or-broader scope already hides the procedural target.
+        let plain_over_procedural = vkind
+            && ckind
+            && !cprocedural
+            && plain_base(vsel).is_some_and(|base| base == csel)
+            && scope_covers(&cpos, &vpos, &reg);
+        // Pass 3 (ii): identical procedural selector, same kind,
+        // strictly-broader scope.
+        let identical_procedural = cprocedural
+            && ckind == vkind
+            && csel == vsel
+            && scope_covers(&cpos, &vpos, &reg)
+            && !scope_covers(&vpos, &cpos, &reg);
+        plain_over_procedural || identical_procedural
+    };
+    Some(subsumed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Transform with default options, returning just the produced lines.
+    fn t(line: &str) -> Vec<String> {
+        transform(line, &TransformOptions::default()).lines
+    }
+
+    /// Transform with pure-CSS comma splitting disabled.
+    fn t_no_split(line: &str) -> Vec<String> {
+        transform(
+            line,
+            &TransformOptions {
+                split_comma_lists: false,
+            },
+        )
+        .lines
+    }
 
     #[test]
     fn passes_through_non_cosmetic_lines() {
@@ -515,31 +1441,177 @@ mod tests {
             "! comment",
             "0.0.0.0 example.com",
         ] {
-            assert_eq!(transform(line), vec![line.to_string()]);
+            assert_eq!(transform(line, &TransformOptions::default()).lines, vec![line.to_string()]);
         }
     }
 
     #[test]
-    fn passes_through_pure_css() {
+    fn passes_through_single_piece_pure_css() {
         for line in [
             "example.com##.ad",
-            "example.com##.a, .b, .c",
             "example.com##.a:has(> .b)",
             "example.com##a:not(.b)",
             "example.com##[href^=\"a,b\"]",
         ] {
-            assert_eq!(transform(line), vec![line.to_string()]);
+            assert_eq!(transform(line, &TransformOptions::default()).lines, vec![line.to_string()]);
         }
+    }
+
+    #[test]
+    fn splits_pure_css_comma_lists() {
+        let out = transform("example.com##.a, .b, .c", &TransformOptions::default());
+        assert!(out.comma_lists_split);
+        assert_eq!(
+            out.lines,
+            vec![
+                "example.com##.a".to_string(),
+                "example.com##.b".to_string(),
+                "example.com##.c".to_string(),
+            ]
+        );
+        // Top-level commas inside attributes/negations are preserved.
+        let out = transform("example.com##[href^=\"a,b\"], .c", &TransformOptions::default());
+        assert!(out.comma_lists_split);
+        assert_eq!(
+            out.lines,
+            vec![
+                "example.com##[href^=\"a,b\"]".to_string(),
+                "example.com##.c".to_string(),
+            ]
+        );
+        // Exceptions split the same way (same first-token keying bug).
+        let out = transform("example.com#@#.a, .b", &TransformOptions::default());
+        assert!(out.comma_lists_split);
+        assert_eq!(
+            out.lines,
+            vec![
+                "example.com#@#.a".to_string(),
+                "example.com#@#.b".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn comma_splitting_can_be_disabled() {
+        assert_eq!(t_no_split("example.com##.a, .b, .c"), vec!["example.com##.a, .b, .c".to_string()]);
+    }
+
+    #[test]
+    fn strips_inert_min_text_length_zero() {
+        assert_eq!(
+            t("example.com##.a:min-text-length(0)"),
+            vec!["example.com##.a".to_string()]
+        );
+        assert_eq!(
+            t("example.com##.a:min-text-length(0):upward(1)"),
+            vec!["example.com##.a:upward(1)".to_string()]
+        );
+        assert_eq!(
+            t("example.com##.a:contains(x):min-text-length(0)"),
+            vec!["example.com##.a:has-text(x)".to_string()]
+        );
+    }
+
+    #[test]
+    fn keeps_meaningful_min_text_length() {
+        assert_eq!(
+            t("example.com##.a:min-text-length(1)"),
+            vec!["example.com##.a:min-text-length(1)".to_string()]
+        );
+    }
+
+    #[test]
+    fn classifies_generic_channels() {
+        // Bare `.foo`/`#foo` -> cheapest channel.
+        assert_eq!(classify_channel("##.foo"), Some(Channel::SimpleClassId));
+        assert_eq!(classify_channel("###main"), Some(Channel::SimpleClassId));
+        // Token-led compounds -> complex.
+        assert_eq!(classify_channel("##.a.b"), Some(Channel::ComplexTokenLed));
+        assert_eq!(classify_channel("##.a > div"), Some(Channel::ComplexTokenLed));
+        assert_eq!(classify_channel("##.a, .b"), Some(Channel::ComplexTokenLed));
+        assert_eq!(classify_channel("##.a:has(> .b)"), Some(Channel::ComplexTokenLed));
+        // Non-token-led generic selectors are scanned on every page.
+        assert_eq!(classify_channel("##div"), Some(Channel::GenericMisc));
+        assert_eq!(classify_channel("##div.ad"), Some(Channel::GenericMisc));
+        assert_eq!(classify_channel("##a[href^=\"x\"]"), Some(Channel::GenericMisc));
+        assert_eq!(classify_channel("##[data-ad]"), Some(Channel::GenericMisc));
+    }
+
+    #[test]
+    fn classifies_host_channels() {
+        assert_eq!(classify_channel("example.com##.foo"), Some(Channel::HostnameHide));
+        assert_eq!(classify_channel("example.com##div.ad"), Some(Channel::HostnameHide));
+        assert_eq!(classify_channel("example.com##.a, .b"), Some(Channel::HostnameHide));
+        assert_eq!(classify_channel("example.com#@#.ad"), Some(Channel::HostnameUnhide));
+        // Procedural rules (surviving ones are always host-scoped).
+        assert_eq!(
+            classify_channel("example.com##.ad:has-text(x)"),
+            Some(Channel::Procedural)
+        );
+        assert_eq!(
+            classify_channel("example.com##.ad:style(display:none)"),
+            Some(Channel::Procedural)
+        );
+    }
+
+    #[test]
+    fn classifies_negation_hosts_as_generic() {
+        // `~host##.sel` is delivered to every page through the generic channel:
+        // the engine's parser materializes the hidden generic rule alongside
+        // the negated hostname entry.
+        assert_eq!(classify_channel("~blocked.com##.foo"), Some(Channel::SimpleClassId));
+        assert_eq!(classify_channel("~a.com,~b.com##div"), Some(Channel::GenericMisc));
+    }
+
+    #[test]
+    fn classifies_non_cosmetic_lines_as_none() {
+        for line in [
+            "||example.com^",
+            "! comment",
+            "example.com#?#.a:-abp-properties(x)",
+        ] {
+            assert_eq!(classify_channel(line), None, "should skip {line}");
+        }
+    }
+
+    #[test]
+    fn channel_counts_aggregate() {
+        let lines = [
+            "##.a".to_string(),
+            "##.b.c".to_string(),
+            "##div".to_string(),
+            "example.com##.x".to_string(),
+            "example.com#@#.y".to_string(),
+            "example.com##.z:has-text(w)".to_string(),
+        ];
+        let c = channel_counts(&lines);
+        assert_eq!(c.simple_class_id, 1);
+        assert_eq!(c.complex_token_led, 1);
+        assert_eq!(c.generic_misc, 1);
+        assert_eq!(c.hostname_hide, 1);
+        assert_eq!(c.hostname_unhide, 1);
+        assert_eq!(c.procedural, 1);
+    }
+
+    #[test]
+    fn first_class_id_token_prefixes() {
+        assert_eq!(first_class_id_token(".ad"), Some(".ad"));
+        assert_eq!(first_class_id_token(".ad-banner_x"), Some(".ad-banner_x"));
+        assert_eq!(first_class_id_token(".ad.banner"), Some(".ad"));
+        assert_eq!(first_class_id_token("div.ad"), None);
+        assert_eq!(first_class_id_token("[data-x]"), None);
+        assert_eq!(first_class_id_token("#id"), Some("#id"));
+        assert_eq!(first_class_id_token("#id.other"), Some("#id"));
     }
 
     #[test]
     fn rewrites_contains_to_has_text() {
         assert_eq!(
-            transform("example.com##.a:contains(CLICK HERE)"),
+            t("example.com##.a:contains(CLICK HERE)"),
             vec!["example.com##.a:has-text(CLICK HERE)".to_string()]
         );
         assert_eq!(
-            transform("example.com##.a:contains(x):upward(1)"),
+            t("example.com##.a:contains(x):upward(1)"),
             vec!["example.com##.a:has-text(x):upward(1)".to_string()]
         );
     }
@@ -547,7 +1619,7 @@ mod tests {
     #[test]
     fn rewrites_nth_ancestor_to_upward() {
         assert_eq!(
-            transform("example.com##.a:nth-ancestor(2)"),
+            t("example.com##.a:nth-ancestor(2)"),
             vec!["example.com##.a:upward(2)".to_string()]
         );
     }
@@ -555,7 +1627,7 @@ mod tests {
     #[test]
     fn rewrites_abp_contains() {
         assert_eq!(
-            transform("example.com##.a:-abp-contains(x)"),
+            t("example.com##.a:-abp-contains(x)"),
             vec!["example.com##.a:has-text(x)".to_string()]
         );
     }
@@ -571,33 +1643,33 @@ mod tests {
             "example.com##.a:remove-attr()",
             "example.com##.a:has-text(x):others()",
         ] {
-            assert_eq!(transform(line), Vec::<String>::new(), "should drop {line}");
+            assert_eq!(t(line), Vec::<String>::new(), "should drop {line}");
         }
     }
 
     #[test]
     fn strips_watch_attr_keeps_rest() {
         assert_eq!(
-            transform("example.com##.a:watch-attr(disabled):remove-class(is-locked)"),
+            t("example.com##.a:watch-attr(disabled):remove-class(is-locked)"),
             vec!["example.com##.a:remove-class(is-locked)".to_string()]
         );
         assert_eq!(
-            transform("example.com##.a:watch-attr(x)"),
+            t("example.com##.a:watch-attr(x)"),
             vec!["example.com##.a".to_string()]
         );
     }
 
     #[test]
-    fn splits_commas_only_when_procedural() {
+    fn splits_procedural_comma_lists_individually() {
         assert_eq!(
-            transform("example.com##.a, .b:has-text(x)"),
+            t("example.com##.a, .b:has-text(x)"),
             vec![
                 "example.com##.a".to_string(),
                 "example.com##.b:has-text(x)".to_string()
             ]
         );
         assert_eq!(
-            transform("example.com##.a:style(display:none), .b"),
+            t("example.com##.a:style(display:none), .b"),
             vec![
                 "example.com##.a:style(display:none)".to_string(),
                 "example.com##.b".to_string()
@@ -605,7 +1677,7 @@ mod tests {
         );
         // Split happens before rewrites, so pieces are rewritten individually.
         assert_eq!(
-            transform("example.com##.a:contains(x), .b:contains(y)"),
+            t("example.com##.a:contains(x), .b:contains(y)"),
             vec![
                 "example.com##.a:has-text(x)".to_string(),
                 "example.com##.b:has-text(y)".to_string()
@@ -613,7 +1685,7 @@ mod tests {
         );
         // A dropped piece is removed, the rest survive.
         assert_eq!(
-            transform("example.com##.a:others(), .b"),
+            t("example.com##.a:others(), .b"),
             vec!["example.com##.b".to_string()]
         );
     }
@@ -621,11 +1693,11 @@ mod tests {
     #[test]
     fn handles_exception_rules() {
         assert_eq!(
-            transform("example.com#@#.a:contains(x)"),
+            t("example.com#@#.a:contains(x)"),
             vec!["example.com#@#.a:has-text(x)".to_string()]
         );
         assert_eq!(
-            transform("example.com#@#.a, .b:style(display:none)"),
+            t("example.com#@#.a, .b:style(display:none)"),
             vec![
                 "example.com#@#.a".to_string(),
                 "example.com#@#.b:style(display:none)".to_string()
@@ -636,7 +1708,7 @@ mod tests {
     #[test]
     fn does_not_split_commas_inside_args() {
         assert_eq!(
-            transform("example.com##.a:style(background: url(a,b)), .c"),
+            t("example.com##.a:style(background: url(a,b)), .c"),
             vec![
                 "example.com##.a:style(background: url(a,b))".to_string(),
                 "example.com##.c".to_string()
@@ -647,7 +1719,7 @@ mod tests {
     #[test]
     fn leaves_abp_sharp_question_alone() {
         assert_eq!(
-            transform("example.com#?#.a:-abp-properties(x)"),
+            t("example.com#?#.a:-abp-properties(x)"),
             vec!["example.com#?#.a:-abp-properties(x)".to_string()]
         );
     }
@@ -655,7 +1727,7 @@ mod tests {
     #[test]
     fn drops_unbalanced_contains_args() {
         assert_eq!(
-            transform("example.com##.a:contains(foo(bar))"),
+            t("example.com##.a:contains(foo(bar))"),
             Vec::<String>::new()
         );
     }
@@ -901,6 +1973,316 @@ mod tests {
             "! comment".to_string(),
         ];
         let (kept, removed) = subsume(&lines);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, lines);
+    }
+
+    // ---- Pass 2: subsume_selectors ----
+
+    #[test]
+    fn bare_token_covers_target_compounds() {
+        for (cover, victims) in [
+            ("##.ad", vec!["##div.ad", "##.ad.x", "##.a .ad", "##.ad > span", "##div > span.ad"]),
+            ("###main", vec!["##div#main", "##.site #main", "##span#main.x"]),
+        ] {
+            for victim in victims {
+                let lines = vec![cover.to_string(), victim.to_string()];
+                let (kept, removed) = subsume_selectors(&lines);
+                assert_eq!(removed, 1, "{cover} should cover {victim}");
+                assert_eq!(kept, vec![cover.to_string()]);
+            }
+        }
+    }
+
+    #[test]
+    fn sibling_combinator_ends_ancestor_chain() {
+        // `.ad + .x` targets a sibling of the `.ad` element; hiding `.ad` does
+        // not hide `.x`, so it must NOT be dropped.
+        for victim in ["##.ad + .x", "##.ad ~ .x", "##a.ad + b"] {
+            let lines = vec![
+                "##.ad".to_string(),
+                "example.com".to_string().replace("example.com", &victim),
+            ];
+            let (kept, removed) = subsume_selectors(&lines);
+            assert_eq!(removed, 0, "{victim} must survive");
+            assert_eq!(kept, lines);
+        }
+    }
+
+    #[test]
+    fn attr_and_pseudo_led_targets_are_opaque() {
+        // No class/id token on the target => the bare `.ad` cannot prove cover.
+        for victim in ["##[data-ad]", "##a[href^=\"ad\"]", "##a:not(.ad)", "##.ad:has(> span) + .x"] {
+            let lines = vec!["##.ad".to_string(), victim.to_string()];
+            let (kept, removed) = subsume_selectors(&lines);
+            assert_eq!(removed, 0, "{victim} stays opaque to {lines:?}");
+            assert_eq!(kept, lines);
+        }
+    }
+
+    #[test]
+    fn generic_never_covers_host_scoped() {
+        let lines = vec![
+            "##.ad".to_string(),
+            "example.com##div.ad".to_string(),
+        ];
+        let (kept, removed) = subsume_selectors(&lines);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, lines);
+    }
+
+    #[test]
+    fn host_scoped_bare_token_covers_host_victim() {
+        let lines = vec![
+            "example.*##.ad".to_string(),
+            "example.com##div.ad".to_string(),
+            "www.foo.example.com##.ad.x".to_string(),
+            "unrelated.com##div.ad".to_string(),
+        ];
+        let (kept, removed) = subsume_selectors(&lines);
+        assert_eq!(removed, 2);
+        assert_eq!(
+            kept,
+            vec![
+                "example.*##.ad".to_string(),
+                "unrelated.com##div.ad".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn exceptions_exempt_from_bare_token_cover() {
+        let lines = vec![
+            "##.ad".to_string(),
+            "example.com#@#.ad.x".to_string(),
+        ];
+        let (kept, removed) = subsume_selectors(&lines);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, lines);
+    }
+
+    #[test]
+    fn identical_selector_scope_cover_preserved() {
+        let lines = vec![
+            "example.com##.ad".to_string(),
+            "www.example.com##.ad".to_string(),
+            "example.com##.b.c".to_string(),
+            "www.example.com##.b.c".to_string(),
+        ];
+        let (kept, removed) = subsume_selectors(&lines);
+        assert_eq!(removed, 2);
+        assert_eq!(
+            kept,
+            vec![
+                "example.com##.ad".to_string(),
+                "example.com##.b.c".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn bare_cover_is_transitive_through_scope() {
+        // `.ad` at the parent domain survives, so sub-subdomain victims are
+        // still provably covered even when the intermediate `.ad` is itself
+        // dropped (fixpoint).
+        let lines = vec![
+            "a.com##.ad".to_string(),
+            "www.a.com##.ad".to_string(),
+            "cdn.www.a.com##div.ad".to_string(),
+        ];
+        let (kept, removed) = subsume_selectors(&lines);
+        assert_eq!(removed, 2);
+        assert_eq!(kept, vec!["a.com##.ad".to_string()]);
+    }
+
+    #[test]
+    fn procedural_rules_opaque_to_pass2() {
+        let lines = vec![
+            "##.ad".to_string(),
+            "example.com##.ad:has-text(x)".to_string(),
+            "www.example.com##.ad:has-text(x)".to_string(),
+        ];
+        let (kept, removed) = subsume_selectors(&lines);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, lines);
+    }
+
+    #[test]
+    fn negation_only_scopes_opaque() {
+        let lines = vec![
+            "example.com##.ad".to_string(),
+            "~blocked.com##div.ad".to_string(),
+        ];
+        let (kept, removed) = subsume_selectors(&lines);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, lines);
+    }
+
+    // ---- Pass 2 tokenizer primitives ----
+
+    #[test]
+    fn split_compounds_respects_parens_and_attr() {
+        let parts = split_compounds(".a:has(> .b) > .c").unwrap();
+        let texts: Vec<&str> = parts.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(texts, vec![".a:has(> .b)", ".c"]);
+        let parts = split_compounds("a[href^=\"x y\"] b").unwrap();
+        assert_eq!(parts[0].1, "a[href^=\"x y\"]");
+    }
+
+    #[test]
+    fn split_compounds_marks_sibling_combinators() {
+        let parts = split_compounds(".a > .b + .c ~ .d").unwrap();
+        assert_eq!(
+            parts,
+            vec![
+                (Combinator::NoneOrDescendant, ".a".to_string()),
+                (Combinator::Child, ".b".to_string()),
+                (Combinator::Sibling, ".c".to_string()),
+                (Combinator::Sibling, ".d".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn compound_features_ignores_nested_classes() {
+        let f = compound_features(".ad:has(> .x.b)");
+        assert_eq!(f.classes, vec!["ad".to_string()]);
+        assert!(f.has_pseudo);
+        let f = compound_features("[data-x=\"a.b\"]");
+        assert!(f.has_attr);
+        assert!(f.classes.is_empty());
+        let f = compound_features("div#main.ad");
+        assert_eq!(f.ids, vec!["main".to_string()]);
+        assert_eq!(f.classes, vec!["ad".to_string()]);
+    }
+
+    #[test]
+    fn cover_candidates_derives_target_and_ancestor_tokens() {
+        assert_eq!(cover_candidates("div.ad"), vec![".ad".to_string()]);
+        assert_eq!(cover_candidates(".a .ad"), vec![".a".to_string(), ".ad".to_string()]);
+        assert_eq!(cover_candidates(".ad > span"), vec![".ad".to_string()]);
+        assert_eq!(cover_candidates("div > span.ad"), vec![".ad".to_string()]);
+        // The sibling `.ad` is not an ancestor, so only the target token counts.
+        assert_eq!(cover_candidates(".ad + .x"), vec![".x".to_string()]);
+        assert_eq!(cover_candidates("[data-ad]"), Vec::<String>::new());
+        assert_eq!(
+            cover_candidates(".site #main"),
+            vec!["#main".to_string(), ".site".to_string()]
+        );
+    }
+
+    // ---- Pass 3: subsume_procedural ----
+
+    #[test]
+    fn plain_hide_covers_procedural_variant() {
+        let lines = vec![
+            "example.com##.ad".to_string(),
+            "example.com##.ad:has-text(x)".to_string(),
+            "example.com##.ad:min-text-length(0)".to_string(),
+        ];
+        let (kept, removed) = subsume_procedural(&lines);
+        assert_eq!(removed, 2);
+        assert_eq!(kept, vec!["example.com##.ad".to_string()]);
+    }
+
+    #[test]
+    fn plain_hide_covers_procedural_across_scopes() {
+        let lines = vec![
+            "example.com##.ad".to_string(),
+            "www.example.com##.ad:has-text(x)".to_string(),
+            "unrelated.com##.ad:has-text(x)".to_string(),
+        ];
+        let (kept, removed) = subsume_procedural(&lines);
+        assert_eq!(removed, 1);
+        assert_eq!(
+            kept,
+            vec![
+                "example.com##.ad".to_string(),
+                "unrelated.com##.ad:has-text(x)".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn generic_plain_never_covers_procedural() {
+        // A generic `.ad` is subject to `$generichide`; dropping the host-scoped
+        // procedural rule would lose hiding on opted-out sites.
+        let lines = vec![
+            "##.ad".to_string(),
+            "example.com##.ad:has-text(x)".to_string(),
+        ];
+        let (kept, removed) = subsume_procedural(&lines);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, lines);
+    }
+
+    #[test]
+    fn upward_procedural_never_exchanged_for_plain() {
+        // `:upward(1)` re-targets the rule to an ancestor; plain `.ad` hides
+        // the element itself, not its parent.
+        let lines = vec![
+            "example.com##.ad".to_string(),
+            "example.com##.ad:upward(1)".to_string(),
+        ];
+        let (kept, removed) = subsume_procedural(&lines);
+        assert_eq!(removed, 0);
+        assert_eq!(kept, lines);
+    }
+
+    #[test]
+    fn identical_procedural_scope_cover() {
+        let lines = vec![
+            "example.com##.widget:has-text(x)".to_string(),
+            "www.example.com##.widget:has-text(x)".to_string(),
+            "example.com#@#.widget:has-text(y)".to_string(),
+            "www.example.com#@#.widget:has-text(y)".to_string(),
+        ];
+        let (kept, removed) = subsume_procedural(&lines);
+        assert_eq!(removed, 2);
+        assert_eq!(
+            kept,
+            vec![
+                "example.com##.widget:has-text(x)".to_string(),
+                "example.com#@#.widget:has-text(y)".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn exception_not_covered_by_unrelated_plain() {
+        let lines = vec![
+            "example.com#@#.ad".to_string(),
+            "example.com#@#.ad:has-text(x)".to_string(),
+        ];
+        let (kept, removed) = subsume_procedural(&lines);
+        // The `#@#.ad` exact-string exception does not un-hide `.ad:has-text(x)`.
+        assert_eq!(removed, 0);
+        assert_eq!(kept, lines);
+    }
+
+    #[test]
+    fn plain_base_strips_constraining_ops() {
+        assert_eq!(plain_base(".ad:has-text(x)"), Some(".ad".to_string()));
+        assert_eq!(
+            plain_base(".ad:has-text(x):style(display: none)"),
+            Some(".ad".to_string())
+        );
+        assert_eq!(
+            plain_base(".ad:matches-css(width: 100px)"),
+            Some(".ad".to_string())
+        );
+        assert_eq!(plain_base(".ad:upward(1)"), None);
+        assert_eq!(plain_base(".ad:min-text-length(1)"), Some(".ad".to_string()));
+        assert_eq!(plain_base(":has-text(x)"), None);
+    }
+
+    #[test]
+    fn procedural_not_subsumed_without_plain_cover() {
+        let lines = vec![
+            "example.com##.ad:has-text(x)".to_string(),
+            "example.com##.ad:has-text(y)".to_string(),
+        ];
+        let (kept, removed) = subsume_procedural(&lines);
         assert_eq!(removed, 0);
         assert_eq!(kept, lines);
     }

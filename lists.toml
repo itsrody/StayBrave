@@ -41,6 +41,28 @@ redirect_allowlist = [
   "amazon_ads.js",
 ]
 
+# Cosmetic-filter cost controls. These rewrites make the engine's cosmetic
+# matching faster and its channel routing more predictable, and all of them
+# only remove rules that are provably covered by another (surviving) rule.
+# Each can be disabled individually; the defaults are safe.
+[filter.cosmetic_cost]
+# Pure-CSS `##.a, .b, .c` comma lists are split into individual rules. The
+# engine keys cosmetic rules on the first class/id token only, so the comma
+# list is delivered (and evaluated) in full only when `.a` is present; splitting
+# fixes that routing bug. This is a correctness fix and additionally improves
+# match precision, so it is on by default.
+split_comma_lists = true
+# Pass 2: remove cosmetic rules dominated by a strictly-broader (same-selector)
+# or cheaper (bare class/id token) rule in a channel that covers the victim's
+# scope. Example: `##.ad` removes `##div.ad`. DOM-identical, provably covered.
+subsume_selectors = true
+# Pass 3: remove procedural rules (`:has-text`, `:matches-css`, ...) whose
+# unprocessed base selector is covered by a plain rule, and de-duplicate
+# procedural variants across host names. Generic procedural selectors never
+# survive parsing (`:has-text` requires a host scope), so this only touches
+# host-scoped rules.
+subsume_procedural = true
+
 [[lists]]
 name = "EasyList"
 url = "https://easylist.to/easylist/easylist.txt"

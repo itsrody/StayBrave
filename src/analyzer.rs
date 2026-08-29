@@ -28,6 +28,11 @@ pub struct ListStats {
     /// Cosmetic rules rewritten or split into forms the Brave procedural
     /// engine executes (`:contains` -> `:has-text`, comma-list splitting, ...).
     pub cosmetic_transforms: u64,
+    /// Pure-CSS comma lists split into individual selectors (a correctness
+    /// fix: the engine keys a cosmetic rule on its first token only, so
+    /// `##.a, .b` would hide `.b` only when `.a` is present). A subset of
+    /// `cosmetic_transforms`.
+    pub comma_lists_split: u64,
 }
 
 #[derive(Default)]
@@ -44,6 +49,7 @@ struct AtomicListStats {
     unsupported_options: AtomicU64,
     unsupported_cosmetic: AtomicU64,
     cosmetic_transforms: AtomicU64,
+    comma_lists_split: AtomicU64,
 }
 
 impl AtomicListStats {
@@ -61,6 +67,7 @@ impl AtomicListStats {
             unsupported_options: self.unsupported_options.load(Ordering::Relaxed),
             unsupported_cosmetic: self.unsupported_cosmetic.load(Ordering::Relaxed),
             cosmetic_transforms: self.cosmetic_transforms.load(Ordering::Relaxed),
+            comma_lists_split: self.comma_lists_split.load(Ordering::Relaxed),
         }
     }
 }
@@ -131,14 +138,18 @@ impl Analyzer {
         stats: &AtomicListStats,
     ) -> Vec<String> {
         if filterer.cosmetic_compat {
-            let transformed = cosmetic::transform(candidate);
-            if transformed.len() != 1 || transformed[0] != candidate {
+            let out = cosmetic::transform(candidate, &filterer.cosmetic_transform);
+            if out.comma_lists_split {
+                stats.comma_lists_split.fetch_add(1, Ordering::Relaxed);
+            }
+            if out.lines.len() != 1 || out.lines[0] != candidate {
                 stats.cosmetic_transforms.fetch_add(1, Ordering::Relaxed);
-                if transformed.is_empty() {
+                if out.lines.is_empty() {
                     stats.unsupported_cosmetic.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            return transformed
+            return out
+                .lines
                 .into_iter()
                 .filter_map(|line| self.classify(&line, filterer, stats))
                 .collect();

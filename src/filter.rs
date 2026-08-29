@@ -1,4 +1,5 @@
 use crate::config::FilterConfig;
+use crate::cosmetic::TransformOptions;
 use crate::normalizer::canonical_resource;
 use adblock::filters::cosmetic::{CosmeticFilter, CosmeticFilterMask, CosmeticFilterOperator};
 use adblock::filters::network::{NetworkFilter, NetworkFilterFeaturesMask};
@@ -8,6 +9,8 @@ use std::collections::HashSet;
 pub struct Filterer {
     pub scriptlets: bool,
     pub cosmetic_compat: bool,
+    /// Pass-1 cosmetic format-rewrite options (pure-CSS comma-list splitting).
+    pub cosmetic_transform: TransformOptions,
     redirect_allowlist: HashSet<String>,
 }
 
@@ -16,6 +19,9 @@ impl Filterer {
         Self {
             scriptlets: cfg.scriptlets,
             cosmetic_compat: cfg.cosmetic_compat,
+            cosmetic_transform: TransformOptions {
+                split_comma_lists: cfg.cosmetic_cost.split_comma_lists,
+            },
             redirect_allowlist: cfg.redirect_allowlist.iter().cloned().collect(),
         }
     }
@@ -107,6 +113,7 @@ mod tests {
             redirect_allowlist: Vec::new(),
             cosmetic_compat: true,
             network_optimize: true,
+            cosmetic_cost: Default::default(),
         };
         let f = Filterer::new(&cfg);
         let ParsedLine::Cosmetic(cf) = parse("example.com##+js(set-constant, foo)") else {

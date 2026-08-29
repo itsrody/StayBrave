@@ -41,7 +41,7 @@ lists.toml ──▶ Fetch ──▶ Normalize ──▶ Analyze+Filter ──�
 | Normalize | `src/normalizer.rs` | Translates cross-family syntax into engine-compatible rules: hosts lines to `||domain^`, uBO `$empty`/`$mp4` shorthands to `$redirect`, and uBO/ABP redirect aliases to canonical resource names. |
 | Analyze | `src/analyzer.rs` | Validates every line with `adblock::lists::parse_filter` (rayon-parallel) and classifies results into named statistics buckets. |
 | Filter | `src/filter.rs` | Drops rules referencing functionality the Brave engine cannot execute (uBO scriptlets, unlisted `$redirect` resources). |
-| Optimize | `src/optimizer.rs` | Removes exact duplicates and sorts deterministically. |
+| Optimize | `src/optimizer.rs` | Removes exact duplicates, sorts deterministically, applies proven network/cosmetic subsumption and the cosmetic cost passes (comma-list split, Pass 2/3 subsumption), and reports channel/token-bucket diagnostics. |
 | Write | `src/writer.rs` | Emits `StayBrave.txt` with a full provenance/statistics header. |
 | Config | `src/config.rs` | Typed deserialization of `lists.toml`. |
 
@@ -124,6 +124,14 @@ hosts = true                     # treat as a hosts file, not adblock syntax
     never resolve to a real redirect. Values are compared after
     canonicalization (uBO aliases like `noopjs` → `noop.js`, `abp-resource:`
     prefixes stripped).
+  - `cosmetic_cost` — all fields optional (default `true` each):
+    - `split_comma_lists` — split pure-CSS `##.a, .b` comma lists into
+      individual rules (fixes the engine's first-token cosmetic keying bug).
+    - `subsume_selectors` — Pass 2: remove cosmetic rules provably covered by a
+      broader-scope same-selector rule or a cheaper bare-token generic rule.
+    - `subsume_procedural` — Pass 3: remove procedural rules covered by a plain
+      rule on the same base selector, and de-duplicate procedural variants
+      across host scopes.
 - `[[lists]]` — an array of sources:
   - `name` (required) — display name used in logs and the output header.
   - `url` (required) — http(s) URL of the raw filter list.
@@ -241,12 +249,42 @@ After deduplication and a deterministic byte-wise sort:
   `example.*##.ad` covers `example.com##.ad`, `www.example.co.uk##.ad`, etc.
   A full hostname never covers an entity. Negated locations (`~x`, `~x.*`) and
   procedural selectors stay opaque.
+- **Cosmetic cost passes** (`src/cosmetic.rs`, gated by `[filter.cosmetic_cost]`
+  in `lists.toml`, all default-on). These only remove rules that are provably
+  covered by another (surviving) rule:
+  - `split_comma_lists` — pure-CSS `##.a, .b, .c` comma lists are split into
+    individual rules. The engine keys cosmetic rules on the first class/id
+    token only (`cosmetic_filter_utils.rs`), so an unsplit list is delivered in
+    full only when `.a` is present; splitting fixes that routing bug and
+    improves match precision.
+  - `subsume_selectors` (Pass 2) — two provable cover rules, iterated to a
+    fixpoint so a rule is removed only when its cover also survives: (A) an
+    identical selector on a strictly-broader scope covers (same channel kind);
+    (B) a bare class/id selector covers a costlier descendant selector in the
+    *generic* channel (e.g. `##.ad` removes `##div.ad`, `.ad .x`, `[data-ad]`
+    attribute targets) — the generic engine only materializes rules for
+    present classes, so the two are label-identity-equal. Ancestor compounds
+    behind sibling combinators (`.ad + .x`) are never considered covers, and
+    `$generichide`/host-scoped rules are opaque to generic covers in both
+    directions.
+  - `subsume_procedural` (Pass 3) — generic `:has-text`/`:matches-css` etc.
+    never survive parsing in adblock-rust (`filters/cosmetic.rs` rejects
+    `GenericAction`), so every procedural rule is host-scoped. Pass 3 removes
+    a procedural rule when (i) the same `plain_base` selector exists as a
+    non-procedural hide with a scope that covers it (`##.ad` removes
+    `example.com##.ad:has-text(x)`), or (ii) an identical procedural selector
+    exists on a strictly-broader scope. Procedural exceptions (`#@#…:has-text`)
+    never participate, and exception pruning applies only to exactly-equal
+    selector strings.
 - **Tokenizer diagnostics** — the optimizer reports how final network rules
   distribute across the engine's token buckets: hostname-tokened rules (cheap
   prefilter) vs. catch-all bucket-0 rules that are checked on *every*
   request, plus a count of AdGuard wildcard-TLD `$domain=….*` rules (kept in
   the output — dropping one would broaden blocking — but noted because the
-  engine hashes such values verbatim and they never actually match).
+  engine hashes such values verbatim and they never actually match). Final
+  cosmetic rules are also binned into the engine's delivery channels
+  (simple class/id, complex token-led, generic-misc, hostname-hide,
+  hostname-unhide, procedural) so heavy rules are visible.
 
 ### 5. Write (`src/writer.rs`)
 
@@ -260,10 +298,13 @@ schedule updates, followed by a `!`-comment provenance/statistics header with:
   network/cosmetic rules, unsupported, invalid, hosts-converted, scriptlet and
   redirect counts, and unrecognized-option/unsupported-cosmetic counts.
 - Global totals: input rules, unique output rules, duplicates removed, cosmetic
-  rules subsumed, network rules subsumed, rewritten, semantic duplicates merged,
-  wildcard-TLD `$domain` rules, and the estimated token-bucket split
-  (hostname-tokened vs. catch-all network rules), plus validated network/
-  cosmetic counts and filtered scriptlet + redirect counts.
+  rules subsumed (Pass 2), procedural rules subsumed (Pass 3), network rules
+  subsumed, rewritten, semantic duplicates merged, wildcard-TLD `$domain`
+  rules, the estimated token-bucket split (hostname-tokened vs. catch-all
+  network rules), and the cosmetic channel distribution (simple class/id,
+  complex token-led, generic-misc, hostname-hide, hostname-unhide,
+  procedural), plus validated network/cosmetic counts and filtered scriptlet +
+  redirect counts.
 
 The `Title`, `Description`, `Expires`, and `Homepage` values come from the
 `[output]` section of `lists.toml`; `Version` is the generation timestamp

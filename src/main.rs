@@ -72,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
                     unsupported_options = stats.unsupported_options,
                     unsupported_cosmetic = stats.unsupported_cosmetic,
                     cosmetic_transforms = stats.cosmetic_transforms,
+                    comma_lists_split = stats.comma_lists_split,
                     "analyzed"
                 );
                 summaries.push(ListSummary {
@@ -91,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
                     unsupported_options: stats.unsupported_options,
                     unsupported_cosmetic: stats.unsupported_cosmetic,
                     cosmetic_transforms: stats.cosmetic_transforms,
+                    comma_lists_split: stats.comma_lists_split,
                 });
             }
             Err(e) => {
@@ -113,18 +115,25 @@ async fn main() -> anyhow::Result<()> {
                     unsupported_options: 0,
                     unsupported_cosmetic: 0,
                     cosmetic_transforms: 0,
+                    comma_lists_split: 0,
                 });
             }
         }
     }
 
-    let optimized = optimize(all_rules, cfg.filter.cosmetic_compat, cfg.filter.network_optimize);
+    let optimized = optimize(
+        all_rules,
+        cfg.filter.cosmetic_compat,
+        cfg.filter.network_optimize,
+        &cfg.filter.cosmetic_cost,
+    );
     let scriptlets_removed: u64 = summaries.iter().map(|s| s.scriptlets_removed).sum();
     let redirects_removed: u64 = summaries.iter().map(|s| s.redirects_removed).sum();
     let hosts_converted: u64 = summaries.iter().map(|s| s.hosts_converted).sum();
     let unsupported_options: u64 = summaries.iter().map(|s| s.unsupported_options).sum();
     let unsupported_cosmetic: u64 = summaries.iter().map(|s| s.unsupported_cosmetic).sum();
     let cosmetic_transforms: u64 = summaries.iter().map(|s| s.cosmetic_transforms).sum();
+    let comma_lists_split: u64 = summaries.iter().map(|s| s.comma_lists_split).sum();
     tracing::info!(
         sources_fetched = sources_ok,
         sources_failed,
@@ -133,7 +142,14 @@ async fn main() -> anyhow::Result<()> {
         unique_rules = optimized.unique_rules,
         final_rules = optimized.rules.len(),
         duplicates_removed = optimized.duplicates_removed,
-        cosmetic_subsumed = optimized.cosmetic_subsumed,
+        cosmetic_subsumed = optimized.cosmetic_selectors_subsumed,
+        procedural_subsumed = optimized.procedural_subsumed,
+        simple_class_id = optimized.simple_class_id,
+        complex_token_led = optimized.complex_token_led,
+        generic_misc = optimized.generic_misc,
+        hostname_hide = optimized.hostname_hide,
+        hostname_unhide = optimized.hostname_unhide,
+        procedural = optimized.procedural,
         network_subsumed = optimized.network_subsumed,
         scoped_subsumed = optimized.scoped_subsumed,
         rewritten = optimized.rewritten,
@@ -147,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
         unsupported_options,
         unsupported_cosmetic,
         cosmetic_transforms,
+        comma_lists_split,
         "optimization complete"
     );
 
