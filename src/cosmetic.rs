@@ -21,6 +21,20 @@
 //!   `:matches-media`, `:watch-attr`, `:-abp-properties`, `:nth-ancestor`,
 //!   `:matches-prop`, empty `:remove-attr()`/`:remove-class()`/`:style()`, and
 //!   every comma list that contains one of the procedural/action operators.
+//!
+//! Transform rewrites include:
+//! * `:style(display:none[!important])` stripped to a plain-CSS hide.
+//! * `:contains`/`:-abp-contains` rewritten to `:has-text`.
+//! * `:nth-ancestor` rewritten to `:upward`.
+//! * `:min-text-length(0)` stripped (inert).
+//! * `:watch-attr` stripped.
+//!
+//! Subsumption passes (Pass 2 and 3):
+//! * Bare-token covers: single `.class`/`#id`, multi-class `.a.b`, and
+//!   compound `div.ad` selectors serve as covers when they carry no
+//!   pseudo-classes or attributes.
+//! * Constraint-count subsumption: a procedural rule with fewer operators is
+//!   always at least as broad as one with more at the same base selector.
 
 use std::collections::{HashMap, HashSet};
 
@@ -206,6 +220,15 @@ fn transform_piece(piece: &str) -> Option<String> {
     while let Some(stripped) = strip_op(&sel, ":watch-attr(") {
         sel = stripped.trim().to_string();
     }
+
+    // Strip `:style(display:none)` — the engine already applies display:none
+    // to every element matched by a `##` hide, so this action is redundant.
+    // Only exact `display:none` variants are stripped; other style properties
+    // (e.g., `:style(color:red)`) are kept as meaningful procedural actions.
+    while let Some(stripped) = strip_style_display_none(&sel) {
+        sel = stripped.trim().to_string();
+    }
+
     if sel.is_empty() {
         return None;
     }
@@ -262,6 +285,32 @@ fn strip_zero_min_text_length(selector: &str) -> String {
             return sel;
         }
         sel.replace_range(start..arg_end + 1, "");
+    }
+}
+
+/// Strip one `:style(display:none)` occurrence (with optional whitespace and
+/// `!important`). Returns the string with the operator removed, or `None` when
+/// the operator is absent or carries a property other than `display:none`.
+///
+/// Only the exact `display:none` value is stripped — other style properties like
+/// `:style(color:red)` are kept as meaningful procedural actions.
+fn strip_style_display_none(selector: &str) -> Option<String> {
+    const OP: &str = ":style(";
+    let start = selector.find(OP)?;
+    let arg_start = start + OP.len();
+    let arg_end = find_closing_paren(selector, arg_start)?;
+    let arg = selector[arg_start..arg_end].trim();
+    // Normalize: remove all whitespace, then match patterns.
+    let normalized: String = arg.chars().filter(|c| !c.is_whitespace()).collect();
+    if normalized.eq_ignore_ascii_case("display:none")
+        || normalized.eq_ignore_ascii_case("display:none!important")
+    {
+        let mut out = String::with_capacity(selector.len());
+        out.push_str(&selector[..start]);
+        out.push_str(&selector[arg_end + 1..]);
+        Some(out)
+    } else {
+        None
     }
 }
 
@@ -912,6 +961,12 @@ fn compound_features(compound: &str) -> CompoundFeatures {
 ///   descendant/child combinators — hiding that ancestor hides the whole
 ///   subtree it constrains.
 ///
+/// Additionally, compound selectors that consist entirely of class/id tokens
+/// (e.g., `.a.b`) or an element-type + class/id (e.g., `div.ad`) are returned
+/// as bare covers when they carry no pseudo-classes or attributes. This enables
+/// `##.a.b` to cover `##div.a.b`, `##.a.b > span`, and `##div.ad` to cover
+/// `##div.ad > .inner`.
+///
 /// Compounds reached through a sibling combinator are skipped: hiding a
 /// sibling never hides the target.
 pub fn cover_candidates(selector: &str) -> Vec<String> {
@@ -925,16 +980,93 @@ pub fn cover_candidates(selector: &str) -> Vec<String> {
             continue;
         }
         let features = compound_features(text);
-        for class in features.classes {
+        for class in &features.classes {
             out.push(format!(".{class}"));
         }
-        for id in features.ids {
+        for id in &features.ids {
             out.push(format!("#{id}"));
+        }
+        // Compound bare cover: when a compound has no pseudo-classes or
+        // attributes, the full compound string serves as a bare cover.
+        // Multi-class: `.a.b` covers `##div.a.b`, `##.a.b > span`
+        // Compound: `div.ad` covers `##div.ad > .inner`, `##div.ad .banner`
+        if !features.has_pseudo && !features.has_attr {
+            let all_tokens = features.classes.len() + features.ids.len();
+            if all_tokens > 0 {
+                // Always emit the sorted class-only subset: `.a.b` from
+                // `div.a.b` so that a `##.a.b` cover can match.
+                let mut tokens: Vec<String> = features
+                    .classes
+                    .iter()
+                    .map(|c| format!(".{c}"))
+                    .chain(features.ids.iter().map(|id| format!("#{id}")))
+                    .collect();
+                tokens.sort();
+                if tokens.len() > 1 {
+                    out.push(tokens.join(""));
+                }
+                let has_element = text
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() && c != '.' && c != '#');
+                // Full compound: element-type + class/id (e.g., div.ad)
+                if has_element {
+                    out.push(text.trim().to_string());
+                }
+            }
         }
     }
     out.sort();
     out.dedup();
     out
+}
+
+/// Compute the bare cover tokens for a rule's selector. These are the tokens
+/// that, if present in `cover_candidates()` of a victim, would prove the
+/// victim is covered by this rule.
+fn compute_bare_covers(selector: &str) -> Vec<String> {
+    let mut covers = Vec::new();
+    // Single class/id: `.ad` or `#id` as the entire selector.
+    if let Some(tok) = first_class_id_token(selector) {
+        if tok == selector {
+            covers.push(tok.to_string());
+        }
+    }
+    // Multi-class/compound bare covers only for single-compound selectors
+    // (no combinators). Descendant/child selectors like `.a .ad` are more
+    // specific than the bare token and cannot serve as covers.
+    let Some(compounds) = split_compounds(selector) else {
+        return covers;
+    };
+    if compounds.len() != 1 {
+        return covers;
+    }
+    if let Some((_combinator, text)) = compounds.first() {
+        let features = compound_features(text);
+        if !features.has_pseudo && !features.has_attr {
+            let all_tokens = features.classes.len() + features.ids.len();
+            let has_element = text
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() && c != '.' && c != '#');
+            if all_tokens > 0 && !has_element {
+                let mut tokens: Vec<String> = features
+                    .classes
+                    .iter()
+                    .map(|c| format!(".{c}"))
+                    .chain(features.ids.iter().map(|id| format!("#{id}")))
+                    .collect();
+                tokens.sort();
+                covers.push(tokens.join(""));
+            }
+            if all_tokens > 0 && has_element {
+                covers.push(text.trim().to_string());
+            }
+        }
+    }
+    covers.sort();
+    covers.dedup();
+    covers
 }
 
 /// A cosmetic rule candidate for Pass-2 selector subsumption.
@@ -946,8 +1078,10 @@ struct SelectorRule<'a> {
     /// Positive location tokens. `Some(vec![])` when generic (all pages);
     /// `None` when the scope is opaque (negations, non-hostname locations).
     positives: Option<Vec<LocToken>>,
-    /// Bare `.class`/`#id` selector when this rule can act as a cover.
-    bare: Option<String>,
+    /// Bare selector strings when this rule can act as a cover. May contain
+    /// multiple forms: single `.class`/`#id`, multi-class `.a.b`, and
+    /// compound `div.ad`.
+    bare: Vec<String>,
 }
 
 /// True when a rule scope `cover` provably matches every URL that `victim`
@@ -1032,9 +1166,7 @@ pub fn subsume_selectors(lines: &[String]) -> (Vec<String>, u64) {
             is_hide: sep == "##",
             selector,
             positives,
-            bare: first_class_id_token(selector)
-                .filter(|tok| *tok == selector)
-                .map(|t| t.to_string()),
+            bare: compute_bare_covers(selector),
         });
     }
 
@@ -1088,10 +1220,9 @@ pub fn subsume_selectors(lines: &[String]) -> (Vec<String>, u64) {
             if !rule.is_hide {
                 continue;
             }
-            let Some(crypt) = &rule.bare else {
-                continue;
-            };
-            covers_by_token.entry(crypt.clone()).or_default().push(rule);
+            for crypt in &rule.bare {
+                covers_by_token.entry(crypt.clone()).or_default().push(rule);
+            }
         }
         for victim in &rules {
             if removed.contains(&victim.index) || !victim.is_hide {
@@ -1171,6 +1302,20 @@ pub fn plain_base(selector: &str) -> Option<String> {
     Some(base.to_string())
 }
 
+/// Extract the sorted list of procedural operator names from a selector.
+/// Each operator is the opening prefix (e.g., `:has-text(`, `:matches-css(`).
+/// Used for constraint-count subsumption: fewer constraints = broader rule.
+fn extract_constraint_ops(selector: &str) -> Vec<String> {
+    let mut ops = Vec::new();
+    for &op in EXECUTABLE_OPS {
+        if selector.contains(op) {
+            ops.push(op.to_string());
+        }
+    }
+    ops.sort();
+    ops
+}
+
 /// A cosmetic rule candidate for Pass-3 procedural subsumption.
 struct ProceduralRule<'a> {
     index: usize,
@@ -1179,13 +1324,16 @@ struct ProceduralRule<'a> {
     /// True when the selector still carries a procedural/action operator.
     procedural: bool,
     positives: Option<Vec<LocToken>>,
-    /// Plain-CSS base for `##` hides that `[`plain_base`] could compute.
+    /// Plain-CSS base for `##` hides that [`plain_base`] could compute.
     base: Option<String>,
+    /// Sorted list of procedural operator names (e.g., `[":has-text(", ":matches-css("]`).
+    /// Used for constraint-count subsumption: fewer constraints = broader rule.
+    constraint_ops: Vec<String>,
 }
 
 /// Pass 3: procedural rule subsumption.
 ///
-/// Two provable drops:
+/// Three provable drops:
 ///
 /// * **Plain hide over procedural variant** — a procedural hide whose plain-CSS
 ///   base (all constraining/action operators stripped) is exactly matched by a
@@ -1197,6 +1345,11 @@ struct ProceduralRule<'a> {
 /// * **Identical procedural selector, broader scope** — the engine stores
 ///   host-scoped procedural rules as JSON keyed by hostname token, which is
 ///   probed across the label chain; a narrower-scope duplicate is redundant.
+/// * **Constraint-count subsumption** — a procedural rule with fewer constraints
+///   (fewer procedural operators) is always at least as broad as one with more,
+///   at the same base selector and equal-or-broader scope. `##.a:has-text(x)`
+///   covers `##.a:has-text(x):matches-css(y)` because adding `:matches-css()`
+///   only narrows the result set.
 ///
 /// Exceptions (`#@#`) never participate in the plain-over-procedural direction
 /// (the engine's exceptions are exact-selector-string prunes, so a `#@#.ad`
@@ -1226,6 +1379,11 @@ pub fn subsume_procedural(lines: &[String]) -> (Vec<String>, u64) {
             } else {
                 None
             },
+            constraint_ops: if is_procedural(selector) {
+                extract_constraint_ops(selector)
+            } else {
+                Vec::new()
+            },
         });
     }
 
@@ -1236,10 +1394,14 @@ pub fn subsume_procedural(lines: &[String]) -> (Vec<String>, u64) {
     // filtered at use.
     let mut plain_by_selector: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut by_selector: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut by_base: HashMap<String, Vec<usize>> = HashMap::new();
     for (idx, rule) in rules.iter().enumerate() {
         by_selector.entry(rule.selector).or_default().push(idx);
         if rule.is_hide && !rule.procedural {
             plain_by_selector.entry(rule.selector).or_default().push(idx);
+        }
+        if let Some(base) = &rule.base {
+            by_base.entry(base.clone()).or_default().push(idx);
         }
     }
 
@@ -1295,6 +1457,55 @@ pub fn subsume_procedural(lines: &[String]) -> (Vec<String>, u64) {
                     continue;
                 };
                 if scope_covers(cp, vp, &reg) && !scope_covers(vp, cp, &reg) {
+                    removed.insert(victim.index);
+                    added = true;
+                    break;
+                }
+            }
+        }
+
+        // (iii) constraint-count subsumption: a procedural rule with fewer
+        // constraints is always at least as broad as one with more, at the same
+        // base selector and equal-or-broader scope.
+        for victim in &rules {
+            if removed.contains(&victim.index) || !victim.procedural || !victim.is_hide {
+                continue;
+            }
+            let Some(vp) = &victim.positives else {
+                continue;
+            };
+            let Some(base) = &victim.base else {
+                continue;
+            };
+            for &oi in by_base.get(base.as_str()).into_iter().flatten() {
+                if removed.contains(&oi) || oi == victim.index {
+                    continue;
+                }
+                let other = &rules[oi];
+                if !other.procedural || !other.is_hide {
+                    continue;
+                }
+                if other.is_hide != victim.is_hide {
+                    continue;
+                }
+                // The cover must have a strict subset of the victim's
+                // constraint operators (fewer constraints = broader).
+                if other.constraint_ops.len() >= victim.constraint_ops.len() {
+                    continue;
+                }
+                if !other
+                    .constraint_ops
+                    .iter()
+                    .all(|op| victim.constraint_ops.contains(op))
+                {
+                    continue;
+                }
+                let Some(cp) = &other.positives else {
+                    continue;
+                };
+                // Fewer constraints already proves strict breadth — only
+                // verify the cover reaches the victim's URL set.
+                if scope_covers(cp, vp, &reg) {
                     removed.insert(victim.index);
                     added = true;
                     break;
@@ -1671,7 +1882,7 @@ mod tests {
         assert_eq!(
             t("example.com##.a:style(display:none), .b"),
             vec![
-                "example.com##.a:style(display:none)".to_string(),
+                "example.com##.a".to_string(),
                 "example.com##.b".to_string()
             ]
         );
@@ -1700,7 +1911,7 @@ mod tests {
             t("example.com#@#.a, .b:style(display:none)"),
             vec![
                 "example.com#@#.a".to_string(),
-                "example.com#@#.b:style(display:none)".to_string()
+                "example.com#@#.b".to_string()
             ]
         );
     }
@@ -2158,10 +2369,10 @@ mod tests {
 
     #[test]
     fn cover_candidates_derives_target_and_ancestor_tokens() {
-        assert_eq!(cover_candidates("div.ad"), vec![".ad".to_string()]);
+        assert_eq!(cover_candidates("div.ad"), vec![".ad".to_string(), "div.ad".to_string()]);
         assert_eq!(cover_candidates(".a .ad"), vec![".a".to_string(), ".ad".to_string()]);
         assert_eq!(cover_candidates(".ad > span"), vec![".ad".to_string()]);
-        assert_eq!(cover_candidates("div > span.ad"), vec![".ad".to_string()]);
+        assert_eq!(cover_candidates("div > span.ad"), vec![".ad".to_string(), "span.ad".to_string()]);
         // The sibling `.ad` is not an ancestor, so only the target token counts.
         assert_eq!(cover_candidates(".ad + .x"), vec![".x".to_string()]);
         assert_eq!(cover_candidates("[data-ad]"), Vec::<String>::new());
@@ -2284,6 +2495,149 @@ mod tests {
         ];
         let (kept, removed) = subsume_procedural(&lines);
         assert_eq!(removed, 0);
+        assert_eq!(kept, lines);
+    }
+
+    // ---- Item 1: :style(display:none) rewrite ----
+
+    #[test]
+    fn style_display_none_stripped() {
+        assert_eq!(
+            t("example.com##.ad:style(display:none)"),
+            vec!["example.com##.ad".to_string()]
+        );
+        assert_eq!(
+            t("example.com##.ad:style(display: none)"),
+            vec!["example.com##.ad".to_string()]
+        );
+        assert_eq!(
+            t("example.com##.ad:style(display:none!important)"),
+            vec!["example.com##.ad".to_string()]
+        );
+        assert_eq!(
+            t("example.com##.ad:style(display: none !important)"),
+            vec!["example.com##.ad".to_string()]
+        );
+        // Other style properties are kept.
+        assert_eq!(
+            t("example.com##.ad:style(color:red)"),
+            vec!["example.com##.ad:style(color:red)".to_string()]
+        );
+        // Empty :style() is dropped (existing behavior).
+        assert_eq!(t("example.com##.ad:style()"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn style_display_none_in_comma_list() {
+        assert_eq!(
+            t("example.com##.a:style(display:none), .b"),
+            vec![
+                "example.com##.a".to_string(),
+                "example.com##.b".to_string()
+            ]
+        );
+    }
+
+    // ---- Items 2 & 5: Multi-class and compound bare covers ----
+
+    #[test]
+    fn multiclass_bare_cover() {
+        let lines = vec![
+            "example.com##.a.b".to_string(),
+            "sub.example.com##div.a.b".to_string(),
+        ];
+        let (kept, removed) = subsume_selectors(&lines);
+        assert_eq!(removed, 1, "example.com##.a.b should cover sub.example.com##div.a.b");
+        assert_eq!(kept, vec!["example.com##.a.b".to_string()]);
+    }
+
+    #[test]
+    fn compound_bare_cover() {
+        let lines = vec![
+            "example.com##div.ad".to_string(),
+            "sub.example.com##div.ad > .inner".to_string(),
+        ];
+        let (kept, removed) = subsume_selectors(&lines);
+        assert_eq!(removed, 1, "example.com##div.ad should cover sub.example.com##div.ad > .inner");
+        assert_eq!(kept, vec!["example.com##div.ad".to_string()]);
+    }
+
+    #[test]
+    fn multiclass_bare_cover_descendant() {
+        let lines = vec![
+            "example.com##.a.b".to_string(),
+            "sub.example.com##.x .a.b".to_string(),
+        ];
+        let (kept, removed) = subsume_selectors(&lines);
+        assert_eq!(removed, 1, "example.com##.a.b should cover sub.example.com##.x .a.b");
+        assert_eq!(kept, vec!["example.com##.a.b".to_string()]);
+    }
+
+    #[test]
+    fn multiclass_bare_cover_does_not_cover_sibling() {
+        let lines = vec![
+            "example.com##.a.b".to_string(),
+            "sub.example.com##.a.b + .x".to_string(),
+        ];
+        let (kept, removed) = subsume_selectors(&lines);
+        assert_eq!(removed, 0, "##.a.b must not cover ##.a.b + .x");
+        assert_eq!(kept, lines);
+    }
+
+    #[test]
+    fn generic_never_covers_host_scoped_multiclass() {
+        let lines = vec![
+            "##.a.b".to_string(),
+            "example.com##div.a.b".to_string(),
+        ];
+        let (kept, removed) = subsume_selectors(&lines);
+        assert_eq!(removed, 0, "generic must not cover host-scoped");
+        assert_eq!(kept, lines);
+    }
+
+    // ---- Item 4: Constraint-count subsumption ----
+
+    #[test]
+    fn constraint_count_subsumption() {
+        let lines = vec![
+            "example.com##.ad:has-text(x)".to_string(),
+            "example.com##.ad:has-text(x):matches-css(display:block)".to_string(),
+        ];
+        let (kept, removed) = subsume_procedural(&lines);
+        assert_eq!(removed, 1, "fewer constraints should cover more");
+        assert_eq!(kept, vec!["example.com##.ad:has-text(x)".to_string()]);
+    }
+
+    #[test]
+    fn constraint_count_subsumption_across_scopes() {
+        let lines = vec![
+            "example.com##.ad:has-text(x)".to_string(),
+            "sub.example.com##.ad:has-text(x):matches-css(display:block)".to_string(),
+        ];
+        let (kept, removed) = subsume_procedural(&lines);
+        assert_eq!(removed, 1);
+        assert_eq!(kept, vec!["example.com##.ad:has-text(x)".to_string()]);
+    }
+
+    #[test]
+    fn constraint_count_not_subsumed_when_same_ops() {
+        let lines = vec![
+            "example.com##.ad:has-text(x)".to_string(),
+            "example.com##.ad:has-text(y)".to_string(),
+        ];
+        let (kept, removed) = subsume_procedural(&lines);
+        assert_eq!(removed, 0, "same constraint count should not subsume");
+        assert_eq!(kept, lines);
+    }
+
+    #[test]
+    fn constraint_count_not_subsumed_when_narrower_scope() {
+        let lines = vec![
+            "sub.example.com##.ad:has-text(x)".to_string(),
+            "example.com##.ad:has-text(x):matches-css(display:block)".to_string(),
+        ];
+        let (kept, removed) = subsume_procedural(&lines);
+        assert_eq!(removed, 0, "narrower scope should not be subsumed");
         assert_eq!(kept, lines);
     }
 }
