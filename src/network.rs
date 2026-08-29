@@ -25,15 +25,29 @@
 //! `@@`, or `~`) participate; anything with options, exceptions, regex or
 //! entity hosts is opaque and left untouched. Matching is case-insensitive, so
 //! comparisons are done on lowercased host/path.
+//!
+//! `||host^` and `||host/path^` forms are preserved as-is. A bare hostname
+//! anchor `||host^` is *not* a regex rule in adblock-rust: the `^` end
+//! separator becomes the right-anchor flag, and a hostname-anchored +
+//! right-anchored rule with no content-type options implicitly carries
+//! `FROM_ALL_TYPES` — it blocks top-level Document navigations too. Rewriting
+//! it to `||host/` would silently drop navigation blocking, so no such
+//! conversion is performed.
 
 use std::collections::{HashMap, HashSet};
 
 /// A simple option-less block rule: `||host^` or `||host/path^`.
+///
+/// The `terminator` records how the raw rule ended (`^` or `/`), preserving
+/// the head-of-host bare form `||host^` vs `||host/`. They subsume identically
+/// (both are "any path on this host"), but they are *not* the same rule: the
+/// `^` form also blocks top-level Document navigations, the `/` form does not.
 #[derive(Debug, Clone)]
 pub struct SimpleRule {
     pub raw: String,
     pub host: String,
     pub path: String,
+    pub terminator: char,
 }
 
 /// Parse a rule into a subsumption candidate. Returns `None` for exceptions,
@@ -44,7 +58,7 @@ pub fn parse_simple_rule(raw: &str) -> Option<SimpleRule> {
         return None;
     }
     let body = raw.strip_prefix("||")?;
-    let (body, _terminator) = if let Some(b) = body.strip_suffix('^') {
+    let (body, terminator) = if let Some(b) = body.strip_suffix('^') {
         (b, '^')
     } else if let Some(b) = body.strip_suffix('/') {
         (b, '/')
@@ -65,6 +79,7 @@ pub fn parse_simple_rule(raw: &str) -> Option<SimpleRule> {
         raw: raw.to_string(),
         host: host.to_string(),
         path,
+        terminator,
     })
 }
 
@@ -178,6 +193,10 @@ pub fn subsume(lines: &[String]) -> (Vec<String>, u64) {
             .len()
             .cmp(&b.0.host.len())
             .then(a.0.path.len().cmp(&b.0.path.len()))
+            // Between identical host+path rules (`||host^` vs `||host/`) prefer
+            // the `^` head-of-host form: it is a strict superset (also blocks
+            // top-level Document navigations), so it must be the survivor.
+            .then(b.0.terminator.cmp(&a.0.terminator))
     });
 
     // Kept rules indexed by (lowercased) host: each entry is a path that has
@@ -213,45 +232,122 @@ pub fn subsume(lines: &[String]) -> (Vec<String>, u64) {
     (kept, removed_count)
 }
 
-/// Convert `||host^` to `||host/` to eliminate the regex flag.
+/// Count AdGuard-style wildcard-TLD `$domain` restrictions (`domain=example.*`).
 ///
-/// The `^` separator compiles to a regex character class
-/// `(?:[^\w\d\._%-]|$)` which forces lazy regex compilation and the
-/// `RegexManager` hotpath.  Converting to `/` makes the pattern a plain
-/// string, enabling SIMD `memmem` matching.
-///
-/// This is safe because hostname-anchored rules (`||host`) always match
-/// against the URL portion after the hostname, which in practice always
-/// starts with `/` for real HTTP requests.  The only behavioural
-/// difference is bare-hostname requests without a path (e.g. `https://host`
-/// without a trailing `/`), which are always redirected to `host/` by
-/// servers and are negligible for ad blocking.
-pub fn convert_bare_host_caret(lines: &[String]) -> Vec<String> {
+/// adblock-rust 0.13.x hashes `$domain` values verbatim and has no wildcard-TLD
+/// support for network filters (unlike cosmetics' `entity.*` locations), so a
+/// rule restricted to `domain=streamgoto.*` never matches. These rules are kept
+/// in the output (dropping one would *broaden* blocking) but are reported so
+/// the count and blast radius are visible.
+pub fn count_wildcard_domain_rules(lines: &[String]) -> usize {
     lines
         .iter()
-        .map(|line| {
+        .filter(|line| {
             let trimmed = line.trim();
-            if let Some(body) = trimmed.strip_prefix("||") {
-                let (pattern, opts) = match body.rfind('$') {
-                    Some(i) => (&body[..i], Some(&body[i..])),
-                    None => (body, None),
-                };
-                if let Some(host) = pattern.strip_suffix('^') {
-                    if !host.is_empty()
-                        && !host.contains('/')
-                        && !host.contains('*')
-                        && !host.contains('@')
-                    {
-                        return match opts {
-                            Some(o) => format!("||{host}/{o}"),
-                            None => format!("||{host}/"),
-                        };
-                    }
-                }
+            let Some(idx) = trimmed.rfind('$') else {
+                return false;
+            };
+            if trimmed.rfind("#@#").is_some()
+                || trimmed.contains("##")
+                || trimmed.contains("#?#")
+            {
+                return false;
             }
-            line.clone()
+            let opts = &trimmed[idx + 1..];
+            opts.split(',').any(|opt| {
+                let Some(name) = opt.strip_prefix("domain=") else {
+                    return false;
+                };
+                name.split('|').any(|d| d.ends_with(".*"))
+            })
         })
-        .collect()
+        .count()
+}
+
+/// Approximate where rules land in the engine's token bucket structure.
+///
+/// The engine prefilters each request by hashing its URL tokens and consulting
+/// the corresponding buckets; rules with no durable token fall into bucket 0
+/// (the catch-all), which is checked on *every* request. This function mirrors
+/// `NetworkFilter::get_tokens` (filter-part tokenization with the right/left
+/// anchor skip rules, single-`$domain`-as-token, and `OptDomains` fallback) to
+/// reproduce that distribution from plain rule text.
+///
+/// Returns `(hostname_tokened, catch_all)`. Catch-all rules are the ones that
+/// cost evaluation on every request; hostname-tokened rules are the cheapest to
+/// prefilter. The counts are diagnostics — an estimate, not a guarantee — and
+/// only network rules are classified.
+pub fn token_bucket_estimate(lines: &[String]) -> (usize, usize) {
+    use adblock::filters::network::NetworkFilterMaskHelper;
+    use adblock::lists::{parse_filter, ParseOptions, ParsedLine};
+
+    let mut hostname_tokened = 0usize;
+    let mut catch_all = 0usize;
+    for line in lines {
+        let Ok(ParsedLine::Network(f)) =
+            parse_filter(line.trim(), false, ParseOptions::default())
+        else {
+            continue;
+        };
+        let is_hostname_regex =
+            f.is_regex() && f.hostname.as_ref().is_some_and(|h| h.starts_with('/'));
+        if f.is_hostname_anchor()
+            && !is_hostname_regex
+            && f.hostname.as_ref().is_some_and(|h| !h.is_empty())
+        {
+            // Label tokens from the hostname guarantee a durable bucket.
+            hostname_tokened += 1;
+            continue;
+        }
+
+        // Filter-part tokens, mirroring get_tokens' skip rules.
+        let skip_first = f.is_right_anchor();
+        let skip_last = (f.is_plain() || f.is_regex()) && !f.is_right_anchor();
+        let filter_tokens = f
+            .filter
+            .string_view()
+            .map(|s| tokenize_runs(&s, skip_first, skip_last))
+            .unwrap_or(0);
+
+        let has_durable_token = filter_tokens > 0
+            || (f.opt_domains.is_some()
+                && f.opt_not_domains.is_none()
+                && f.opt_domains.as_ref().is_some_and(|d| !d.is_empty()));
+        if has_durable_token {
+            continue;
+        }
+        catch_all += 1;
+    }
+    (hostname_tokened, catch_all)
+}
+
+/// Runs of at least two alphanumeric/`%` bytes, matching the engine's
+/// `utils::tokenize`, then drops the first/last run per anchor state.
+fn tokenize_runs(s: &str, skip_first: bool, skip_last: bool) -> usize {
+    let mut runs = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'%' {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'%') {
+                i += 1;
+            }
+            if i - start >= 2 {
+                runs.push(i);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let mut n = runs.len();
+    if skip_first {
+        n = n.saturating_sub(1);
+    }
+    if skip_last && n > 0 {
+        n -= 1;
+    }
+    n
 }
 
 /// Options that are pure content-type / protocol / party constraints and are
@@ -339,6 +435,7 @@ pub fn subsume_scoped(lines: &[String]) -> (Vec<String>, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use adblock::Engine;
 
     fn run(lines: &[&str]) -> (Vec<String>, u64) {
         let lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
@@ -509,7 +606,7 @@ mod tests {
     fn badfilter_base_rule_not_used_for_subsumption() {
         // The real-world totaladblock.com pattern: a $badfilter cancels the
         // base rule, so the base rule must not survive to subsume the www variant.
-        let (kept, removed) = run(&[
+        let (kept, _removed) = run(&[
             "||totaladblock.com^",
             "||totaladblock.com^$badfilter",
             "||totaladblock.com^$document",
@@ -526,7 +623,7 @@ mod tests {
     fn badfilter_with_options_only_cancels_matching_base() {
         // $badfilter with options should only cancel the matching base,
         // not a differently-optioned rule.
-        let (kept, removed) = run(&[
+        let (kept, _removed) = run(&[
             "||example.com^$document",
             "||example.com^$document,badfilter",
             "||example.com^$script",
@@ -550,30 +647,109 @@ mod tests {
     }
 
     #[test]
-    fn bare_host_caret_converts_to_slash() {
-        let input: Vec<String> = vec![
+    fn bare_host_caret_preferred_over_slash() {
+        // Identical host+path rules: the `^` head-of-host form must survive
+        // (it is a superset that also blocks top-level navigations).
+        let (kept, removed) = run(&["||example.com/", "||example.com^"]);
+        assert_eq!(removed, 1);
+        assert_eq!(kept, vec!["||example.com^".to_string()]);
+        let (kept, removed) = run(&[
+            "||example.com/path/",
+            "||example.com/path^",
+            "||sub.example.com/path^",
+        ]);
+        assert_eq!(removed, 2);
+        assert_eq!(kept, vec!["||example.com/path^".to_string()]);
+    }
+
+    #[test]
+    fn caret_rule_blocks_top_level_navigations() {
+        // Verified against adblock-rust 0.13.2: a bare `||host^` parses to a
+        // right-anchored hostname rule carrying the implicit
+        // FROM_ALL_TYPES mask, so it blocks a main-frame "document" request.
+        use adblock::request::Request;
+        let engine = Engine::new_with_list_text("||example.com^\n".to_string());
+        let req = Request::new(
+            "https://example.com/",
+            "https://source.example.net/",
+            "document",
+            "GET",
+        )
+        .unwrap();
+        assert!(engine.check_network_request(&req).should_block());
+        assert!(engine.check_network_request(&req).exception.is_none());
+    }
+
+    #[test]
+    fn slash_form_does_not_block_top_level_navigations() {
+        // `||host/` is parsed as a plain left-anchored pattern with only the
+        // sub-resource mask, so a navigation to the host is NOT blocked.
+        use adblock::request::Request;
+        let engine = Engine::new_with_list_text("||example.com/\n".to_string());
+        let req = Request::new(
+            "https://example.com/",
+            "https://source.example.net/",
+            "document",
+            "GET",
+        )
+        .unwrap();
+        assert!(!engine.check_network_request(&req).should_block());
+        // As a sub-resource it still blocks, so the two forms behave
+        // identically for every request type except top-level navigations.
+        let req = Request::new(
+            "https://example.com/",
+            "https://source.example.net/",
+            "script",
+            "GET",
+        )
+        .unwrap();
+        assert!(engine.check_network_request(&req).should_block());
+    }
+
+    #[test]
+    fn wildcard_tld_domain_rules_counted() {
+        let lines: Vec<String> = vec![
+            "*$3p,script,domain=streamgoto.*".into(),
+            "||html-load.com/$script,domain=a.com|b.*".into(),
+            "||example.com^$domain=example.com".into(),
             "||example.com^".into(),
-            "||example.com/foo^".into(),
-            "||unrelated.com^".into(),
         ];
-        let output = convert_bare_host_caret(&input);
-        assert_eq!(output[0], "||example.com/");
-        assert_eq!(output[1], "||example.com/foo^");
-        assert_eq!(output[2], "||unrelated.com/");
+        assert_eq!(count_wildcard_domain_rules(&lines), 2);
     }
 
     #[test]
-    fn bare_host_caret_with_options() {
-        let input: Vec<String> = vec!["||example.com^$script".into()];
-        let output = convert_bare_host_caret(&input);
-        assert_eq!(output[0], "||example.com/$script");
+    fn wildcard_tld_domain_never_matches_in_engine() {
+        // adblock-rust 0.13 hashes `$domain=streamgoto.*` verbatim; no source
+        // hostname hash can equal it, so the rule never fires.
+        use adblock::request::Request;
+        let engine = Engine::new_with_list_text(
+            "*$3p,script,domain=streamgoto.*\n||example.com^$script\n".to_string(),
+        );
+        let req = Request::new(
+            "https://anywhere.com/track.js",
+            "https://app.streamgoto.co.uk/",
+            "script",
+            "GET",
+        )
+        .unwrap();
+        assert!(!engine.check_network_request(&req).should_block());
     }
 
     #[test]
-    fn bare_host_caret_with_path_not_converted() {
-        let input: Vec<String> = vec!["||example.com/ads^".into()];
-        let output = convert_bare_host_caret(&input);
-        assert_eq!(output[0], "||example.com/ads^");
+    fn token_bucket_estimate_classifies() {
+        let lines: Vec<String> = vec![
+            "||example.com^".into(),          // hostname-tokened
+            "||example.com/foo^".into(),      // hostname-tokened
+            "||example.com/ads$script".into(), // hostname-tokened
+            "*$script".into(),                // catch-all
+            "ads$script".into(),              // single-token, unanchored -> catch-all
+            "/ads/foo/$script".into(),        // no anchor, tokens survive
+            "##.ad".into(),                   // cosmetic, not counted
+            "@@||google.com/analytics.js".into(), // exception still classified
+        ];
+        let (hostname_tokened, catch_all) = token_bucket_estimate(&lines);
+        assert_eq!(hostname_tokened, 4);
+        assert_eq!(catch_all, 2);
     }
 
     #[test]

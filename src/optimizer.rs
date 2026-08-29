@@ -11,9 +11,16 @@ pub struct OptimizedRules {
     pub cosmetic_subsumed: usize,
     pub network_subsumed: usize,
     pub scoped_subsumed: usize,
-    pub caret_converted: usize,
     pub rewritten: usize,
     pub semantic_merged: usize,
+    /// Network rules restricted with an AdGuard wildcard-TLD `$domain=….*`.
+    /// adblock-rust 0.13 hashes such values verbatim, so these never match.
+    pub wildcard_domain_rules: usize,
+    /// Estimated distribution of final network rules across the engine's token
+    /// buckets: hostname-tokened (cheap) rules and catch-all bucket-0 rules
+    /// (checked on every request). See [`network::token_bucket_estimate`].
+    pub hostname_tokened: usize,
+    pub catch_all_estimated: usize,
 }
 
 pub fn optimize(rules: Vec<String>, cosmetic_compat: bool, network_optimize: bool) -> OptimizedRules {
@@ -35,29 +42,24 @@ pub fn optimize(rules: Vec<String>, cosmetic_compat: bool, network_optimize: boo
         (unique, 0)
     };
 
-    let (rules, network_subsumed, rewritten, semantic_merged, scoped_subsumed, caret_converted) =
-        if network_optimize {
-            let report = Rewriter::default().rewrite_list(rules);
-            let rules_before_caret = report.rules.clone();
-            let rules = network::convert_bare_host_caret(&report.rules);
-            let caret_converted = rules
-                .iter()
-                .zip(rules_before_caret.iter())
-                .filter(|(after, before)| after != before)
-                .count();
-            let (rules, network_subsumed) = network::subsume(&rules);
-            let (rules, scoped_subsumed) = network::subsume_scoped(&rules);
-            (
-                rules,
-                network_subsumed,
-                report.stats.rewritten as usize,
-                report.stats.merged_duplicates as usize,
-                scoped_subsumed,
-                caret_converted,
-            )
-        } else {
-            (rules, 0, 0, 0, 0, 0)
-        };
+    let (rules, network_subsumed, rewritten, semantic_merged, scoped_subsumed) = if network_optimize
+    {
+        let report = Rewriter::default().rewrite_list(rules);
+        let (rules, network_subsumed) = network::subsume(&report.rules);
+        let (rules, scoped_subsumed) = network::subsume_scoped(&rules);
+        (
+            rules,
+            network_subsumed,
+            report.stats.rewritten as usize,
+            report.stats.merged_duplicates as usize,
+            scoped_subsumed,
+        )
+    } else {
+        (rules, 0, 0, 0, 0)
+    };
+
+    let (hostname_tokened, catch_all_estimated) = network::token_bucket_estimate(&rules);
+    let wildcard_domain_rules = network::count_wildcard_domain_rules(&rules);
 
     OptimizedRules {
         rules,
@@ -67,9 +69,11 @@ pub fn optimize(rules: Vec<String>, cosmetic_compat: bool, network_optimize: boo
         cosmetic_subsumed: cosmetic_subsumed as usize,
         network_subsumed: network_subsumed as usize,
         scoped_subsumed: scoped_subsumed as usize,
-        caret_converted,
         rewritten,
         semantic_merged,
+        wildcard_domain_rules,
+        hostname_tokened,
+        catch_all_estimated,
     }
 }
 
@@ -104,13 +108,13 @@ mod tests {
         assert_eq!(off.rules.len(), 3);
         let on = stats(&rules, false, true);
         assert_eq!(on.network_subsumed, 2);
-        assert_eq!(on.rules, vec!["||example.com/".to_string()]);
+        assert_eq!(on.rules, vec!["||example.com^".to_string()]);
     }
 
     #[test]
     fn rewriter_lowercases_and_merges() {
         let o = stats(&["||Example.com^", "||example.com^", "||WWW.Example.com^"], false, true);
         assert!(o.rewritten > 0);
-        assert_eq!(o.rules, vec!["||example.com/".to_string()]);
+        assert_eq!(o.rules, vec!["||example.com^".to_string()]);
     }
 }

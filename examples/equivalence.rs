@@ -179,30 +179,39 @@ fn probe_urls(raw: &str) -> Vec<String> {
     urls
 }
 
+/// Request types each corpus URL is probed across. The navigation types
+/// (`document`, `sub_frame`) matter most: `||host^` blocks them but a narrower
+/// rewrite (`||host/`) silently would not, and probing only `other` cannot see
+/// the difference.
+const REQUEST_TYPES: &[&str] = &["other", "script", "sub_frame", "document"];
+
 fn check_corpus(before: &Engine, after: &Engine, urls: &[String]) -> (usize, usize) {
     let mut mismatches = 0usize;
     let mut checked = 0usize;
     for url in urls {
-        if let Ok(req) = adblock::request::Request::new(url, "https://www.example.com/", "other", "GET")
-        {
-            let ra = before.check_network_request(&req);
-            let rb = after.check_network_request(&req);
-            if !compare_network(&ra, &rb) {
-                mismatches += 1;
-                if mismatches <= 10 {
-                    eprintln!(
-                        "NET MISMATCH {url}: before(block={},exc={},redir={:?}) after(block={},exc={},redir={:?})",
-                        ra.should_block(),
-                        ra.exception.is_some(),
-                        ra.redirect,
-                        rb.should_block(),
-                        rb.exception.is_some(),
-                        rb.redirect,
-                    );
+        for rtype in REQUEST_TYPES {
+            if let Ok(req) =
+                adblock::request::Request::new(url, "https://www.example.com/", rtype, "GET")
+            {
+                let ra = before.check_network_request(&req);
+                let rb = after.check_network_request(&req);
+                if !compare_network(&ra, &rb) {
+                    mismatches += 1;
+                    if mismatches <= 10 {
+                        eprintln!(
+                            "NET MISMATCH {rtype} {url}: before(block={},exc={},redir={:?}) after(block={},exc={},redir={:?})",
+                            ra.should_block(),
+                            ra.exception.is_some(),
+                            ra.redirect,
+                            rb.should_block(),
+                            rb.exception.is_some(),
+                            rb.redirect,
+                        );
+                    }
                 }
             }
+            checked += 1;
         }
-        checked += 1;
     }
     (checked, mismatches)
 }
@@ -359,6 +368,14 @@ fn main() -> anyhow::Result<()> {
         .cloned()
         .collect();
     for line in &rewritten {
+        corpus.extend(probe_urls(line));
+    }
+    // In steady state the rewritten list is already minimal and the danger zone
+    // above is empty, so also sample broadly across ALL network rules — this
+    // keeps the request-type matrix (document/sub_frame included) exercised on
+    // every run rather than going silent when nothing was removed.
+    let step = (report.rules.len() / 60_000).max(1);
+    for line in report.rules.iter().step_by(step) {
         corpus.extend(probe_urls(line));
     }
     let cap: usize = std::env::var("EQ_MAX_NET_URLS")

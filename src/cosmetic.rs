@@ -267,15 +267,28 @@ fn contains_any(s: &str, ops: &[&str]) -> bool {
     ops.iter().any(|op| s.contains(op))
 }
 
+/// A positive location token of a host-scoped cosmetic rule: either a plain
+/// hostname (`example.com`) or an entity (`example.*`). Entity locations are
+/// hashed from the label before `.*` and probed against a strictly broader URL
+/// set (every label suffix of the hostname without its public suffix, plus the
+/// bare public suffix), so `example.*` is broader than `example.com`,
+/// `www.example.co.uk`, `deep.sub.example.org`, etc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocToken {
+    Host(String),
+    /// Label of an `example.*` entity location (the `.*` stripped).
+    Entity(String),
+}
+
 /// A host-scoped cosmetic rule that is a candidate for same-selector scope
 /// subsumption.
 struct HostRule {
     /// `true` for `##` hides, `false` for `#@#` exceptions.
     kind: bool,
     selector: String,
-    /// Positive hostname tokens (already lowercased). Empty rules never reach
+    /// Positive location tokens (already lowercased). Empty rules never reach
     /// here.
-    positives: Vec<String>,
+    positives: Vec<LocToken>,
     /// Index into the input lines.
     index: usize,
 }
@@ -298,12 +311,65 @@ fn covers(a: &str, b: &str, reg_of_b: &str) -> bool {
 }
 
 /// True when the token set `a` covers `b`: every token of `b` is `a`-scoped.
-fn token_sets_cover(a: &[String], b: &[String], reg: &HashMap<String, Option<String>>) -> bool {
-    b.iter().all(|t| {
-        reg.get(t)
-            .and_then(|r| r.as_ref())
-            .is_some_and(|r| a.iter().any(|p| covers(p, t, r)))
+fn token_sets_cover(a: &[LocToken], b: &[LocToken], reg: &HashMap<String, Option<String>>) -> bool {
+    b.iter().all(|tb| {
+        let reg_of_b = match tb {
+            LocToken::Host(h) => reg.get(h).and_then(|r| r.as_ref()).map(|x| x.as_str()),
+            LocToken::Entity(_) => None,
+        };
+        a.iter().any(|ta| loc_token_covers(ta, tb, reg_of_b))
     })
+}
+
+/// True when a single location token `a` provably covers a single token `b`
+/// under the engine's matching semantics.
+fn loc_token_covers(a: &LocToken, b: &LocToken, reg_of_b: Option<&str>) -> bool {
+    match (a, b) {
+        (LocToken::Host(x), LocToken::Host(y)) => covers(x, y, reg_of_b.unwrap_or_default()),
+        // An entity restricts nothing about the TLD: `example.*` matches any
+        // URL whose label chain (without its public suffix, or the bare public
+        // suffix itself) contains the entity label.
+        (LocToken::Entity(x), LocToken::Host(y)) => entity_covers_host(x, y),
+        (LocToken::Entity(x), LocToken::Entity(y)) => x == y || y.ends_with(&format!(".{x}")),
+        // A full hostname is always narrower than an entity: `example.com`
+        // cannot substitute for `example.*` (hosts on other TLDs would be
+        // lost), so it never covers one.
+        (LocToken::Host(_), LocToken::Entity(_)) => false,
+    }
+}
+
+/// True when entity location `entity` (the label before `.*`) covers a
+/// hostname-scoped rule `hostname`: every URL matched by `hostname##sel` has
+/// `entity` in the entity-probe hash set the engine computes for that URL.
+///
+/// That set is the label suffixes of the hostname with its public suffix
+/// removed, plus the bare public suffix (`get_entity_hashes_from_labels`). So
+/// `example.*` covers `example.com` (labels `example` + `com`), `example.org`,
+/// `sub.example.co.uk` (labels of `sub.example`, public suffix `co.uk`), and
+/// the bare public-suffix case `com` -> any `.com` host.
+fn entity_covers_host(entity: &str, hostname: &str) -> bool {
+    let Some(domain) = registrable_domain(hostname) else {
+        return false;
+    };
+    let Some(dot) = domain.find('.') else {
+        // Single-label domain (e.g. `localhost`): the engine derives no
+        // entity labels, so nothing can cover it via an entity.
+        return false;
+    };
+    let public_suffix = &domain[dot + 1..];
+    if entity == public_suffix {
+        return true;
+    }
+    let Some(without_ps) = hostname
+        .strip_suffix(public_suffix)
+        .and_then(|h| h.strip_suffix('.'))
+    else {
+        return false;
+    };
+    if without_ps.is_empty() {
+        return false;
+    }
+    without_ps == entity || without_ps.ends_with(&format!(".{entity}"))
 }
 
 /// Registrable domain of a rule token, matching the engine's own resolver.
@@ -312,26 +378,37 @@ fn registrable_domain(token: &str) -> Option<String> {
     adblock::url_parser::parse_url(&url).map(|u| u.domain().to_ascii_lowercase())
 }
 
-/// Extract the positive hostname tokens of a rule's host part. Returns `None`
-/// when the rule cannot participate in subsumption (entities, negations, or a
-/// non-hostname location such as a regex) — such rules are opaque.
-fn positive_host_tokens(host: &str) -> Option<Vec<String>> {
+/// Extract the positive location tokens of a rule's host part. Returns `None`
+/// when the rule cannot participate in subsumption (negations, or a
+/// non-hostname location such as a regex) — such rules are opaque. Entities
+/// (`part.*`) participate as `LocToken::Entity`.
+fn positive_location_tokens(host: &str) -> Option<Vec<LocToken>> {
     let mut out = Vec::new();
     for part in host.split(',') {
         let part = part.trim();
         if part.is_empty() {
             continue;
         }
-        if part.starts_with('~') || part.ends_with(".*") {
+        if part.starts_with('~') {
             return None;
         }
-        if !part
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-        {
+        let valid_chars = |label: &str| {
+            label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        };
+        if let Some(label) = part.strip_suffix(".*") {
+            // Entity location: only a trailing `.*` is allowed; any other `*`
+            // stays opaque.
+            if label.is_empty() || !valid_chars(label) {
+                return None;
+            }
+            out.push(LocToken::Entity(label.to_ascii_lowercase()));
+        } else if valid_chars(part) {
+            out.push(LocToken::Host(part.to_ascii_lowercase()));
+        } else {
             return None;
         }
-        out.push(part.to_ascii_lowercase());
     }
     if out.is_empty() {
         return None;
@@ -344,20 +421,22 @@ fn positive_host_tokens(host: &str) -> Option<Vec<String>> {
 /// semantics:
 ///
 /// Among host-scoped rules with the same selector and kind (`##` vs `#@#`), a
-/// rule whose hostname tokens are all subdomains of another rule's tokens is
-/// redundant, because the broader rule matches every URL the narrower one does
-/// through the same delivery channel (host-scoped hides / exceptions are
-/// resolved per navigation by probing the label chain).
+/// rule whose location tokens are all subdomains (or entity-scoped) of another
+/// rule's tokens is redundant, because the broader rule matches every URL the
+/// narrower one does through the same delivery channel (host-scoped hides /
+/// exceptions are resolved per navigation by probing the label chain).
 ///
 /// Generic rules are never used as covers: generic selectors are delivered
 /// through different channels (the per-page `misc_generic_selectors` scan or
 /// `hidden_class_id_selectors`, both skipped under `$generichide`), so a
 /// generic rule does not provably substitute for a host-scoped one.
 ///
-/// Only plain-CSS (non-procedural) rules with pure hostname constraints
-/// participate; rules using entities (`x.*`), negations (`~x`), or procedural
-/// operators are left untouched. Returns the kept lines and how many were
-/// removed.
+/// Only plain-CSS (non-procedural) rules with pure hostname/entity constraints
+/// participate; rules using negations (`~x`, `~x.*`) or procedural operators
+/// are left untouched. Entity locations (`x.*`) participate only as *covers*:
+/// the engine's entity probe set is broader than any full hostname's, and a
+/// full hostname can never cover an entity. Returns the kept lines and how
+/// many were removed.
 pub fn subsume(lines: &[String]) -> (Vec<String>, u64) {
     let mut rules: Vec<HostRule> = Vec::new();
 
@@ -372,7 +451,7 @@ pub fn subsume(lines: &[String]) -> (Vec<String>, u64) {
         if host.is_empty() {
             continue;
         }
-        let Some(positives) = positive_host_tokens(host) else {
+        let Some(positives) = positive_location_tokens(host) else {
             continue;
         };
         rules.push(HostRule {
@@ -387,7 +466,10 @@ pub fn subsume(lines: &[String]) -> (Vec<String>, u64) {
     for token in rules
         .iter()
         .flat_map(|r| r.positives.iter())
-        .map(|t| t.as_str())
+        .filter_map(|t| match t {
+            LocToken::Host(h) => Some(h.as_str()),
+            LocToken::Entity(_) => None,
+        })
         .collect::<HashSet<_>>()
     {
         reg.insert(token.to_string(), registrable_domain(token));
@@ -673,6 +755,8 @@ mod tests {
 
     #[test]
     fn subsume_skips_opaque_rules() {
+        // Unity-style `.*` entities *do* participate and cover subdomains, but
+        // negations and procedural rules stay opaque.
         let lines = vec![
             "example.*##.ad".to_string(),
             "www.example.com##.ad".to_string(),
@@ -681,8 +765,108 @@ mod tests {
             "www.a.com##.x:has-text(y)".to_string(),
         ];
         let (kept, removed) = subsume(&lines);
+        assert_eq!(removed, 1);
+        assert_eq!(
+            kept,
+            vec![
+                "example.*##.ad".to_string(),
+                "~blocked.com##.ad".to_string(),
+                "a.com##.x:has-text(y)".to_string(),
+                "www.a.com##.x:has-text(y)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn subsume_entity_covers_host_variants() {
+        // `example.*` is probed by the engine for every label suffix of the
+        // registrable domain plus the bare public suffix, so it covers the
+        // classic domain, subdomains, and other TLDs — but NOT `otherexample.com`.
+        let lines = vec![
+            "example.*##.ad".to_string(),
+            "example.com##.ad".to_string(),
+            "www.example.com##.ad".to_string(),
+            "example.org##.ad".to_string(),
+            "otherexample.com##.ad".to_string(),
+            "sub.example.co.uk##.ad".to_string(),
+        ];
+        let (kept, removed) = subsume(&lines);
+        assert_eq!(removed, 4);
+        assert_eq!(
+            kept,
+            vec![
+                "example.*##.ad".to_string(),
+                "otherexample.com##.ad".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn subsume_entity_over_entity() {
+        let lines = vec![
+            "example.*##.ad".to_string(),
+            "sub.example.*##.ad".to_string(),
+        ];
+        let (kept, removed) = subsume(&lines);
+        assert_eq!(removed, 1);
+        assert_eq!(kept, vec!["example.*##.ad".to_string()]);
+    }
+
+    #[test]
+    fn subsume_host_never_covers_entity() {
+        // `example.*` is broader than `example.com`, so the hostname rule is
+        // subsumed by the entity rule — never the other way around.
+        let lines = vec![
+            "example.com##.ad".to_string(),
+            "example.*##.ad".to_string(),
+        ];
+        let (kept, removed) = subsume(&lines);
+        assert_eq!(removed, 1);
+        assert_eq!(kept, vec!["example.*##.ad".to_string()]);
+    }
+
+    #[test]
+    fn subsume_negated_entity_is_opaque() {
+        let lines = vec![
+            "~example.*##.ad".to_string(),
+            "example.com##.ad".to_string(),
+        ];
+        let (kept, removed) = subsume(&lines);
         assert_eq!(removed, 0);
         assert_eq!(kept, lines);
+    }
+
+    #[test]
+    fn entity_location_is_broader_than_hostname_in_engine() {
+        // Ground truth from the engine's cosmetic probe logic: `example.*`
+        // matches any registrable-domain label chain containing `example`,
+        // while `example.com##.ad` is restricted to the `example.com` hostname.
+        let engine = adblock::Engine::new_with_list_text("example.*##.ad\n".to_string());
+        for host in [
+            "example.com",
+            "www.example.com",
+            "example.co.uk",
+            "deep.sub.example.org",
+            "example.biz",
+        ] {
+            let res = engine.url_cosmetic_resources(&format!("https://{host}/"));
+            assert!(
+                res.hide_selectors.contains(".ad"),
+                "entity example.* should hide .ad on {host}"
+            );
+        }
+        let engine = adblock::Engine::new_with_list_text("example.com##.ad\n".to_string());
+        assert!(engine
+            .url_cosmetic_resources("https://www.example.com/")
+            .hide_selectors
+            .contains(".ad"));
+        for host in ["example.org", "example.co.uk", "otherexample.com"] {
+            let res = engine.url_cosmetic_resources(&format!("https://{host}/"));
+            assert!(
+                !res.hide_selectors.contains(".ad"),
+                "hostname example.com##.ad must NOT hide .ad on {host}"
+            );
+        }
     }
 
     #[test]

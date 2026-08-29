@@ -126,6 +126,16 @@ pub fn write_output(
     )?;
     writeln!(
         w,
+        "! Wildcard-TLD $domain rules (never match in adblock-rust 0.13, kept to avoid broadening): {}",
+        rules.wildcard_domain_rules
+    )?;
+    writeln!(
+        w,
+        "! Token buckets (estimated): {} hostname-tokened rules, {} catch-all network rules (checked on every request)",
+        rules.hostname_tokened, rules.catch_all_estimated
+    )?;
+    writeln!(
+        w,
         "! Validated: {} network + {} cosmetic rules (adblock-rust parser)",
         total_network, total_cosmetic
     )?;
@@ -154,7 +164,7 @@ pub fn write_output(
     )?;
     writeln!(
         w,
-        "! Network rules are rewritten to provably-equivalent efficient forms and redundant rules subsumed by broader host/path rules are removed."
+        "! Network rules are rewritten to provably-equivalent efficient forms; redundant rules are subsumed by broader host/path rules. Bare `||host^` rules keep the caret separator: in adblock-rust it is right-anchored (not regex) and blocks top-level document navigations."
     )?;
 
     for rule in &rules.rules {

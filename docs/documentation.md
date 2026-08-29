@@ -216,9 +216,37 @@ cosmetic syntax the engine does not recognize (AdGuard `$cookie`, `$stealth`,
 
 ### 4. Optimize (`src/optimizer.rs`)
 
-- Exact-duplicate rules (across all sources) are removed via a `HashSet`.
-- The remaining rules are sorted byte-wise for a deterministic, diff-able
-  output.
+After deduplication and a deterministic byte-wise sort:
+
+- **Network subsumption** (`src/network.rs`) — option-less block rules
+  (`||host^`, `||host/path^`) are parsed into host/path parts and sorted by
+  length so broader rules are always decided first. A rule is dropped when a
+  kept rule covers it: same-host `host/`, `/path/`-boundary prefixes, or a
+  parent path covering a child path. `$`-option rules, exceptions (`@@`),
+  regex/`*` patterns, and `$domain`-restricted rules are opaque and untouched.
+- **Bare-host caret preservation** — `||host^` and `||host/` subsume
+  identically for sub-resources, but they are *different rules*: in adblock-rust
+  a hostname-anchored, right-anchored rule with no content-type options is
+  given an implicit `FROM_ALL_TYPES` mask, so `||host^` also blocks top-level
+  Document navigations while `||host/` does not. When the two coincide, the
+  `^` form is kept as the survivor. No `||host^` → `||host/` conversion is ever
+  performed: the `^` is not a regex (it is compiled to the right-anchor flag),
+  and rewriting would silently drop navigation blocking.
+- **Cosmetic subsumption** (`src/cosmetic.rs`) — among host-scoped plain-CSS
+  rules with an identical selector and kind, a narrower host scope is dropped
+  when a broader one covers it (subdomain families share the engine's
+  hostname-probe channel). Entity locations (`example.*`) participate as
+  *covers*: the engine's entity probe set (label suffixes of the registrable
+  domain plus the bare public suffix) is broader than any full hostname, so
+  `example.*##.ad` covers `example.com##.ad`, `www.example.co.uk##.ad`, etc.
+  A full hostname never covers an entity. Negated locations (`~x`, `~x.*`) and
+  procedural selectors stay opaque.
+- **Tokenizer diagnostics** — the optimizer reports how final network rules
+  distribute across the engine's token buckets: hostname-tokened rules (cheap
+  prefilter) vs. catch-all bucket-0 rules that are checked on *every*
+  request, plus a count of AdGuard wildcard-TLD `$domain=….*` rules (kept in
+  the output — dropping one would broaden blocking — but noted because the
+  engine hashes such values verbatim and they never actually match).
 
 ### 5. Write (`src/writer.rs`)
 
@@ -232,8 +260,10 @@ schedule updates, followed by a `!`-comment provenance/statistics header with:
   network/cosmetic rules, unsupported, invalid, hosts-converted, scriptlet and
   redirect counts, and unrecognized-option/unsupported-cosmetic counts.
 - Global totals: input rules, unique output rules, duplicates removed, cosmetic
-  rules subsumed, validated network + cosmetic counts, filtered scriptlet +
-  redirect counts, and normalization/elimination totals.
+  rules subsumed, network rules subsumed, rewritten, semantic duplicates merged,
+  wildcard-TLD `$domain` rules, and the estimated token-bucket split
+  (hostname-tokened vs. catch-all network rules), plus validated network/
+  cosmetic counts and filtered scriptlet + redirect counts.
 
 The `Title`, `Description`, `Expires`, and `Homepage` values come from the
 `[output]` section of `lists.toml`; `Version` is the generation timestamp
@@ -266,6 +296,36 @@ The `Title`, `Description`, `Expires`, and `Homepage` values come from the
 - **Deduplication is exact-text**, not semantic. The engine's `Engine`
   internally normalizes equivalent rules at load time; a `.txt` list cannot do
   better.
+- **Wildcard-TLD `$domain=….*` rules never match.** adblock-rust 0.13 hashes
+  `$domain` values verbatim and has no wildcard-TLD support for *network*
+  filters (the `entity.*` wildcard exists only for cosmetic locations). Such
+  rules are kept (dropping one would broaden blocking) and counted in the
+  header, but they are inert.
+- **`||host^` is preferred over `||host/`** for the same bare host — the `^`
+  form additionally blocks top-level document navigations (see Optimize above).
+
+---
+
+## Verification (`examples/`)
+
+Two runnable harnesses rebuild Brave's engine from artifacts and prove the
+pipeline does not change blocking behavior:
+
+```sh
+# Requests the optimizer claims are redundant, probed across a request-type
+# matrix (other/script/image/stylesheet/xhr/media/font/object/ping/websocket/
+# sub_frame/document). Also gates every bare `||host^` rule: it must block a
+# top-level document navigation to its host.
+cargo run --release --example verify -- output/StayBrave.txt
+
+# Before/after engine equivalence over cosmetic hosts, generic class/id
+# selectors, and the network request-type matrix for every rewritten,
+# subsumed, or sampled rule. Fails on any blocking/exception/redirect mismatch.
+cargo run --release --example equivalence -- output/StayBrave.txt
+```
+
+`VERIFY_SAMPLE`, `VERIFY_BASELINE_RULES`, `EQ_MAX_HOSTS`, and `EQ_MAX_NET_URLS`
+tune the sampling sizes.
 
 ---
 
