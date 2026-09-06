@@ -222,14 +222,24 @@ export function subsumeScoped(lines) {
   return [kept, removed, removedLines];
 }
 
-// Approximate distribution across uBO's token buckets (diagnostics only).
-// Hostname-anchored rules and single-`$domain` rules are prefiltered out of
-// the per-request scan entirely (their durable token comes from the host).
-// The residual cost is the catch-all bucket-0 rules: everything left with no
-// durable 2+ char run in the filter part (uBO disqualifies the first run of a
-// non-anchored rule and the trailing `^`/`$` run of a right-anchored one).
+// Approximate distribution across uBO's token buckets (diagnostics only),
+// mirroring `StaticNetFilteringEngine.freeze`: each network rule is stored
+// under the token derived from its pattern (`FilterCompiler.makeToken`), which
+// yields exactly three cost classes:
+//
+//   tokened    — bucket keyed by a real URL token (`||` hostname and pattern
+//                rules with a durable 2+ char run): visited only when the
+//                request host/path contains the token.
+//   justOrigin — `*`/`http(s)://` patterns whose only option is `domain=`:
+//                stored as FilterJustOrigin units behind the ANY/HTTP/HTTPS
+//                token hashes — visited on every request, but the domain is
+//                trie-checked.
+//   catchAll   — the NO_TOKEN bucket: rules whose pattern exposes no durable
+//                2+ char run (`*$script`, negated-only patterns, …); every
+//                request evaluates them in full.
 export function tokenBucketEstimate(lines) {
-  let hostnameTokened = 0;
+  let tokened = 0;
+  let justOrigin = 0;
   let catchAll = 0;
   for (const line of lines) {
     const trimmed = line.trim();
@@ -237,45 +247,52 @@ export function tokenBucketEstimate(lines) {
     if (trimmed.includes('##') || trimmed.includes('#?#') || trimmed.includes('#@#')) continue;
 
     let body = trimmed.startsWith('@@') ? trimmed.slice(2) : trimmed;
-    let optsStr = '';
+    let pattern = body;
+    let opts = [];
     if (body.lastIndexOf('$') !== -1) {
-      optsStr = body.slice(body.lastIndexOf('$') + 1);
-      body = body.slice(0, body.lastIndexOf('$'));
+      pattern = body.slice(0, body.lastIndexOf('$'));
+      opts = body.slice(body.lastIndexOf('$') + 1).split(',');
     }
+    if (pattern.includes('#')) { catchAll += 1; continue; }
 
-    if (body.startsWith('||')) {
-      hostnameTokened += 1;
+    const onlyDomain =
+      opts.length > 0 &&
+      opts.every((o) => {
+        const t = o.trim();
+        if (t.startsWith('~')) return false;
+        const name = t.indexOf('=') === -1 ? t : t.slice(0, t.indexOf('='));
+        return name === 'domain' || name === 'from';
+      });
+    if (pattern === '*') {
+      if (onlyDomain) { justOrigin += 1; continue; }
+      catchAll += 1;
       continue;
     }
-
-    const optNames = optsStr.split(',').map((o) => o.trim()).filter((o) => o !== '');
     if (
-      optNames.length === 1 &&
-      optNames[0].startsWith('domain=') &&
-      !optNames[0].includes('|') &&
-      !optNames[0].includes('~') &&
-      !optNames[0].includes('*')
+      (pattern.startsWith('|http://') || pattern.startsWith('|https://')) &&
+      onlyDomain
     ) {
-      hostnameTokened += 1;
+      justOrigin += 1;
       continue;
     }
 
-    const runs = [];
-    let cur = 0;
-    for (const c of body) {
-      if (/[0-9A-Za-z%]/.test(c)) cur += 1;
-      else if (cur >= 2) {
-        runs.push(cur);
-        cur = 0;
-      } else cur = 0;
+    if (patternIncludesDurableRun(pattern)) {
+      tokened += 1;
+      continue;
     }
-    if (cur >= 2) runs.push(cur);
-
-    const skipFirst = !body.startsWith('/') || body.startsWith('|');
-    const dur = runs.filter((_r, i) => (skipFirst ? i > 0 : true));
-    if (dur.length > 0) continue;
-
     catchAll += 1;
   }
-  return [hostnameTokened, catchAll];
+  return [tokened, justOrigin, catchAll];
+}
+
+const RUN = /[0-9A-Za-z%]{2,}/g;
+function patternIncludesDurableRun(pattern) {
+  RUN.lastIndex = 0;
+  let m;
+  while ((m = RUN.exec(pattern)) !== null) {
+    const bef = m.index === 0 ? '' : pattern[m.index - 1];
+    const aft = m.index + m[0].length < pattern.length ? pattern[m.index + m[0].length] : '';
+    if (bef !== '*' && aft !== '*') return true;
+  }
+  return false;
 }

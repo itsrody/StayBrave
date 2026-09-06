@@ -81,7 +81,7 @@ lists.json ──▶ Fetch ──▶ Preprocess ──▶ Normalize ──▶ An
 | Preprocess | `src/preprocess.js` | Evaluates uBO preparser directives (`!#if` / `!#else` / `!#endif`) against the desktop-Firefox token environment and resolves `!#include`. |
 | Normalize | `src/normalize.js` | Translates cross-family syntax: hosts files to `||domain^`, strips hosting IP comments, drops `localhost` aliases, canonicalizes uBO/ABP redirect resource aliases. uBO-native `$empty`/`$mp4` pass through unchanged. |
 | Analyze | `src/ubo.js` + `src/analyze.js` | Parses every line with uBO's own `AstFilterParser` (`trustedSource:false`, exactly like uBO 1.74+) and classifies results into statistics. Applies the cosmetic preprocessing uBO itself performs (dead-operator detection, procedural rewrite). |
-| Optimize | `src/optimize.js` + `src/network.js` + `src/cosmetic.js` | Removes exact duplicates, sorts deterministically, applies provable network + cosmetic subsumption passes, and reports channel / token-bucket diagnostics. |
+| Optimize | `src/optimize.js` + `src/network.js` + `src/cosmetic.js` + `src/rewrite.js` + `src/efficiency.js` | Canonicalizes net-option spellings, removes exact duplicates, sorts deterministically, applies provable network + cosmetic subsumption passes, and reports SNFE-mirrored token-bucket + A–F efficiency grades. |
 | Cosmetics | `src/cosmetic-engine.js` + `vendor/ubo/` | Runs every `##`/`#@#` rule through uBO's vendored `CosmeticFilteringEngine` (identical parser + writer/reader) and removes the rules stock uBO drops at load — the generic procedural filters that `allowGenericProceduralFilters:false` discards. `filter.cosmetic_engine_filter` gates the pass (default on). |
 | Recheck | `src/engine.js` | Compiles the survivors through uBO's `StaticNetFilteringEngine` and certifies that nothing the Optimize passes removed still needs to block — any coverage hole aborts the build. |
 | Write | `src/writer.js` | Emits `output/StayBrave-Classic.txt` with a full provenance/statistics header. |
@@ -141,6 +141,7 @@ node src/main.js --help
     "scriptlets": true,
     "keep_trusted_only": false,
     "network_optimize": true,
+    "rewrite_canonical_options": true,
     "cosmetic_cost": {
       "split_comma_lists": false,
       "subsume_selectors": true,
@@ -189,6 +190,13 @@ node src/main.js --help
     `@@`) are exempt from the trust requirement and always kept.
   - `network_optimize` (default `true`) — run the network / scoped subsumption
     passes.
+  - `rewrite_canonical_options` (default `true`) — rewrite network option
+    spellings to uBO's canonical long-form names (`$1p`→`$first-party`,
+    `$3p`→`$third-party`, `$xhr`→`$xmlhttprequest`, `$doc`, `$frame`, … from
+    the parser's own synonym map) *before* dedup. Provably semantics-preserving
+    (synonym options resolve to the same node type), lets alias-spelled twins
+    collapse into one rule, and makes scoped subsumption see the exact spelling
+    uBO's engine stores. Counted in the header as `Rewrites`.
   - `cosmetic_engine_filter` (default `true`) — run the merged rules through
     uBO's vendored cosmetic engine and drop the generic procedural filters
     stock uBO discards at load (see 5c).

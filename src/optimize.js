@@ -11,6 +11,8 @@
 
 import { subsume, subsumeScoped, tokenBucketEstimate, countWildcardDomainRules } from './network.js';
 import { subsumeSelectors, subsumeProcedural, channelCounts } from './cosmetic.js';
+import { canonicalizeRules } from './rewrite.js';
+import { analyzeEfficiency } from './efficiency.js';
 
 // Rules that only Firefox uBO can execute (the filter-relevant bullet points
 // of "uBlock Origin works best on Firefox"). Network options are read from the
@@ -54,9 +56,19 @@ export function countFirefoxExclusives(lines) {
 
 export function optimize(rules, filter) {
   const inputRules = rules.length;
+
+  // Fastest-formula rewrite (provable): canonicalize uBO net-option spellings
+  // *before* dedup so alias-spelled twins collapse into one rule and the
+  // subsequent subsumption passes see the exact spelling uBO's engine stores.
+  let active = rules;
+  let canonicalizedRules = 0;
+  if (filter.rewrite_canonical_options !== false) {
+    [active, canonicalizedRules] = canonicalizeRules(rules);
+  }
+
   const seen = new Set();
   const unique = [];
-  for (const rule of rules) {
+  for (const rule of active) {
     if (!seen.has(rule)) {
       seen.add(rule);
       unique.push(rule);
@@ -68,9 +80,8 @@ export function optimize(rules, filter) {
   let networkSubsumed = 0;
   let scopedSubsumed = 0;
   const removedNetwork = [];
-  let active = unique;
   if (filter.network_optimize) {
-    const [afterBasic, n1, r1] = subsume(active);
+    const [afterBasic, n1, r1] = subsume(unique);
     active = afterBasic;
     networkSubsumed = n1;
     removedNetwork.push(...r1);
@@ -94,15 +105,17 @@ export function optimize(rules, filter) {
   }
 
   const channels = channelCounts(active);
-  const [hostnameTokened, catchAllEstimated] = tokenBucketEstimate(active);
+  const [tokened, justOrigin, catchAll] = tokenBucketEstimate(active);
   const wildcardDomainRules = countWildcardDomainRules(active);
   const firefoxExclusive = countFirefoxExclusives(active);
+  const efficiency = analyzeEfficiency(active);
 
   return {
     rules: active,
     input_rules: inputRules,
     unique_rules: uniqueRules,
     duplicates_removed: inputRules - uniqueRules,
+    canonicalized_rules: canonicalizedRules,
     cosmetic_selectors_subsumed: cosmeticSubsumed,
     procedural_subsumed: proceduralSubsumed,
     network_subsumed: networkSubsumed,
@@ -110,8 +123,10 @@ export function optimize(rules, filter) {
     removed_network: removedNetwork,
     pre_opt_lines: unique,
     wildcard_domain_rules: wildcardDomainRules,
-    hostname_tokened: hostnameTokened,
-    catch_all_estimated: catchAllEstimated,
+    token_buckets: { tokened, justOrigin, catchAll },
+    hostname_tokened: tokened,
+    just_origin: justOrigin,
+    catch_all_estimated: catchAll,
     simple_class_id: channels[0],
     complex_token_led: channels[1],
     generic_misc: channels[2],
@@ -119,5 +134,27 @@ export function optimize(rules, filter) {
     hostname_unhide: channels[4],
     procedural: channels[5],
     firefox_exclusive: firefoxExclusive,
+    efficiency,
   };
+}
+
+// Recompute the diagnostic fields against the final rule set (called once the
+// cosmetic-engine pass and provided-list subtraction have dropped rules), so
+// every number the header/CLI prints describes the shipped list.
+export function refreshDiagnostics(o) {
+  const channels = channelCounts(o.rules);
+  const [tokened, justOrigin, catchAll] = tokenBucketEstimate(o.rules);
+  o.token_buckets = { tokened, justOrigin, catchAll };
+  o.hostname_tokened = tokened;
+  o.just_origin = justOrigin;
+  o.catch_all_estimated = catchAll;
+  o.simple_class_id = channels[0];
+  o.complex_token_led = channels[1];
+  o.generic_misc = channels[2];
+  o.hostname_hide = channels[3];
+  o.hostname_unhide = channels[4];
+  o.procedural = channels[5];
+  o.efficiency = analyzeEfficiency(o.rules);
+  o.firefox_exclusive = countFirefoxExclusives(o.rules);
+  return o;
 }

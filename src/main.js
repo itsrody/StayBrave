@@ -98,6 +98,17 @@ try {
       `cosmetic engine: ${fmt(o.cosmetic_engine_dropped)} dead rule(s) dropped (stock uBO would ignore them)`
     );
   }
+  if (o.canonicalized_rules > 0) {
+    console.log(
+      `rewrites: ${fmt(o.canonicalized_rules)} net-option spelling(s) canonicalized to uBO synonyms (alias duplicates collapsed)`
+    );
+  }
+  const eff = o.efficiency ?? {};
+  if (eff.network !== undefined) {
+    console.log(
+      `efficiency: network ${eff.network.grade} (${(eff.network.score * 100).toFixed(1)}%) | cosmetic ${eff.cosmetic.grade} (${(eff.cosmetic.score * 100).toFixed(1)}%) | tokened ${fmt(eff.network.tokened)} | just-origin ${fmt(eff.network.justOrigin)} | catch-all ${fmt(eff.network.catchall)}`
+    );
+  }
   const fe = o.firefox_exclusive ?? {};
   console.log(
     `Firefox-exclusive: ${fmt(fe.html_filters ?? 0)} html_filters, ${fmt(fe.responseheaders ?? 0)} responseheaders, ${fmt(fe.scriptlets ?? 0)} scriptlets, ${fmt(fe.ipaddress ?? 0)} ipaddress, ${fmt(fe.cname ?? 0)} cname, ${fmt(fe.csp ?? 0)} csp` +

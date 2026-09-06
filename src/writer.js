@@ -55,15 +55,30 @@ export function writeOutput(path, outputCfg, optimized, summaries) {
   chunks.push(
     `! Input rules: ${optimized.input_rules} | Unique output: ${optimized.unique_rules} | Final output: ${optimized.rules.length} | Duplicates removed: ${optimized.duplicates_removed} | Cosmetic subsumed: ${optimized.cosmetic_selectors_subsumed} | Procedural subsumed: ${optimized.procedural_subsumed} | Network subsumed: ${optimized.network_subsumed}`
   );
+  if (optimized.canonicalized_rules > 0) {
+    chunks.push(
+      `! Rewrites: ${optimized.canonicalized_rules} net-option spelling(s) canonicalized (uBO synonym map; duplicates collapsed)`
+    );
+  }
   chunks.push(
     `! Engine-filtered cosmetics (dead in stock uBO): ${optimized.cosmetic_engine_dropped ?? 0}`
   );
   chunks.push(
     `! Wildcard-TLD $domain rules (kept to avoid broadening): ${optimized.wildcard_domain_rules}`
   );
+  const tb = optimized.token_buckets ?? {};
+  const tk = tb.tokened ?? optimized.hostname_tokened ?? 0;
+  const jo = tb.justOrigin ?? optimized.just_origin ?? 0;
+  const ca = tb.catchAll ?? optimized.catch_all_estimated ?? 0;
   chunks.push(
-    `! Token buckets (estimated): ${optimized.hostname_tokened} hostname-tokened rules, ${optimized.catch_all_estimated} catch-all network rules (checked on every request)`
+    `! Token buckets (SNFE-mirrored): ${tk} tokened, ${jo} just-origin, ${ca} catch-all network rules (last two are visited on every request)`
   );
+  const eff = optimized.efficiency ?? {};
+  if (eff.network !== undefined) {
+    chunks.push(
+      `! Efficiency (SNFE dispatch): network ${eff.network.grade} (${(eff.network.score * 100).toFixed(1)}%) | cosmetic ${eff.cosmetic.grade} (${(eff.cosmetic.score * 100).toFixed(1)}%)`
+    );
+  }
   chunks.push(
     `! Cosmetic channels: ${optimized.simple_class_id} simple class/id, ${optimized.complex_token_led} complex token-led, ${optimized.generic_misc} generic-misc, ${optimized.hostname_hide} hostname-hide, ${optimized.hostname_unhide} hostname-unhide, ${optimized.procedural} procedural`
   );

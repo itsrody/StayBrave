@@ -4,7 +4,7 @@
 import { Fetcher } from './fetch.js';
 import { analyzeText, emptyStats } from './analyze.js';
 import { makeParser, TRUSTED_SCRIPTLET_TOKENS } from './ubo.js';
-import { optimize } from './optimize.js';
+import { optimize, refreshDiagnostics } from './optimize.js';
 import { verifyRemovedCoverage } from './engine.js';
 import { detectDroppedCosmetics } from './cosmetic-engine.js';
 import { subtractProvided } from './provided.js';
@@ -125,6 +125,10 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
     optimized.provided_network_subsumed = 0;
     optimized.provided_cosmetic_covered = 0;
   }
+
+  // Recompute token buckets / channels / efficiency / exclusives against the
+  // final rule set so every printed number describes the shipped list.
+  refreshDiagnostics(optimized);
 
   const outPath = outputPath ?? config.output.file;
   writeOutput(outPath, config.output, optimized, summaries);
