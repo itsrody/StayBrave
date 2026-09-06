@@ -48,9 +48,15 @@ function isHostScopeHost(host) {
     .every((p) => p.trim() !== '' && !p.trim().startsWith('~'));
 }
 
-export function analyzeText(text, filter, isHosts) {
+// A single `AstFilterParser` instance is created per filter-list analysis (or
+// shared across all sources by the pipeline — uBO itself reuses one parser
+// instance over its whole asset set: `parse()` rewinds the node pool and
+// zeroes every node field, so no state leaks between lines).
+export function analyzeText(text, filter, isHosts, parser) {
   const stats = emptyStats();
-  const parser = makeParser({ keep_trusted_only: filter.keep_trusted_only });
+  if (parser === undefined) {
+    parser = makeParser({ keep_trusted_only: filter.keep_trusted_only });
+  }
   const lines = [];
 
   const expanded = expandConditionals(text);

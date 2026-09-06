@@ -67,14 +67,18 @@ export function isTrustedScriptletToken(token) {
   return token.startsWith('trusted-');
 }
 
-export function makeParser({ keep_trusted_only = false } = {}) {
-  // `interactive: true` activates scriptlet/selector argument validation;
-  // `trustedSource: true` keeps $replace/$urlskip/$uritransform and
-  // trusted-scriptlet rules parseable when the operator explicitly asked to
-  // keep trusted-only syntax.
+export function makeParser({ keep_trusted_only = false, trustedScriptletTokens = TRUSTED_SCRIPTLET_TOKENS } = {}) {
+  // `interactive: true` activates scriptlet/selector argument validation and
+  // the trusted-scriptlet check; `trustedSource: true` keeps $replace,
+  // $urlskip, $uritransform and trusted-scriptlet rules parseable when the
+  // operator explicitly asked to keep trusted-only syntax. The parser flags a
+  // scriptlet token that is in `trustedScriptletTokens` whenever
+  // `trustedSource` is false — the same enforcement uBO applies to lists a
+  // normal browser adds without trusting them.
   return new AstFilterParser({
     interactive: true,
     trustedSource: keep_trusted_only,
+    trustedScriptletTokens,
   });
 }
 

@@ -3,6 +3,7 @@
 
 import { Fetcher } from './fetch.js';
 import { analyzeText, emptyStats } from './analyze.js';
+import { makeParser, TRUSTED_SCRIPTLET_TOKENS } from './ubo.js';
 import { optimize } from './optimize.js';
 import { subtractProvided } from './provided.js';
 import { writeOutput } from './writer.js';
@@ -29,6 +30,14 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
   const allRules = [];
   let sourcesOk = 0;
 
+  // One parser for the whole run, mirroring uBO's own single-instance reuse:
+  // constructor cost is paid once and per-line `parse()` is fully
+  // state-independent between calls.
+  const parser = makeParser({
+    keep_trusted_only: config.filter.keep_trusted_only,
+    trustedScriptletTokens: TRUSTED_SCRIPTLET_TOKENS,
+  });
+
   for (const { source, result } of fetched) {
     const summary = { name: source.name, ok: false, ...emptyStats(), error: null };
     if (!result.ok) {
@@ -45,7 +54,8 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
     const { lines, stats } = analyzeText(
       result.text,
       config.filter,
-      source.hosts
+      source.hosts,
+      parser
     );
     Object.assign(summary, stats);
     summaries.push(summary);

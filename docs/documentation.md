@@ -217,8 +217,12 @@ so platform-specific additions never leak into the merged list.
 ### 4. Analyze (`src/ubo.js`, `src/analyze.js`)
 
 Each line is parsed with **uBO's own `AstFilterParser`** run exactly as uBO
-1.74+ does for a normal (non-advanced/trusted) installation. Results are
-classified and counted:
+1.74+ does for a normal (non-advanced/trusted) installation. One parser
+instance is created per whole pipeline run (not per source) and reused for
+every line — mirroring uBO itself, whose single `AstFilterParser` parses the
+entire enabled asset set. `parse()` rewinds the node pool and zeroes every
+node field, so a shared instance is fully state-independent between lines
+(this is asserted in `test/ubo.test.js`). Results are classified and counted:
 
 | Bucket | Meaning | Action |
 | --- | --- | --- |
@@ -226,6 +230,14 @@ classified and counted:
 | `cosmetic` (`##`, `#?#`, `#@#`) | Valid cosmetic filter | kept → cosmetic pipeline |
 | `scriptlet` (`##+js`, `#@#+js`) | Scriptlet injection | kept only if host-scoped and `scriptlets` enabled; generic dropped |
 | `html` (`##^`) | HTML filtering | kept (uBO 1.74 handles it) |
+
+With `interactive: true` the parser runs its full validation: cosmetic
+selectors through `ExtSelectorCompiler`, network pattern-part AST, and the
+trusted-scriptlet check. Our `TRUSTED_SCRIPTLET_TOKENS` set is passed as the
+parser's `trustedScriptletTokens` option, so a `trusted-*` scriptlet from a
+non-trusted source is flagged `AST_ERROR.UNTRUSTED_SOURCE` by uBO's parser
+itself (dropped in Analyze) rather than by a hand-rolled mirror; the
+`trusted-` prefix check is kept as a superset safety net.
 | `responseheader` (`^responseheader`) | Response-header modifier | kept |
 | `unsupported` | Comment/header/`$$` AdGuard cosmetics | skipped (counted) |
 | `unsupported_options` | Parseable but carries a modifier uBO rejected (`$urlskip`, `$replace`, `$dnsrewrite`, `$web_accessible_resource`, … — all the `trustedSource`/option-validation drops) | dropped (counted) |
