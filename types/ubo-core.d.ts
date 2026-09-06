@@ -52,5 +52,21 @@ declare module '@gorhill/ubo-core' {
       options?: UseListsOptions
     ): Promise<number>;
     matchRequest(details: MatchRequestDetails): Promise<number>;
+    matchAndFetchModifiers(
+      details: MatchRequestDetails,
+      modifierName: string
+    ): Promise<Array<unknown> | undefined>;
+    filterQuery(
+      details: MatchRequestDetails
+    ): Promise<{ redirectURL?: string; directives: Array<unknown> } | undefined>;
+    static release(): Promise<void>;
   }
+}
+
+declare module '@gorhill/ubo-core/js/static-net-filtering.js' {
+  interface StaticNetFilteringEngineSingleton {
+    getFilterCount(): number;
+  }
+  const snfe: StaticNetFilteringEngineSingleton;
+  export default snfe;
 }

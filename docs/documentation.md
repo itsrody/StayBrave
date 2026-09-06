@@ -386,6 +386,17 @@ node examples/verify.js [output] [probeLimit]
    `||host^` / `||host/path^` rules are probed with synthetic script requests
    through `matchRequest`; a rule that fails to block (result `& 1` == 0) means
    the optimizer mis-dropped or over-staticized it and fails the gate.
+4. **Engine registration metric** — `getFilterCount()` (same count uBO's
+   dashboard "used" counter derives from) is compared against the network-line
+   total; a large shortfall (engine silently dropped rules) fails the gate.
+   Cosmetic rules never enter the SNFE, so the expectation is `units >= lines`;
+   the surplus comes from `$redirect`/`$redirect-rule` double-registration.
+5. **Modifier probes** — a sample of host-anchored `$removeparam` (via
+   `filterQuery`), `$csp`, `$permissions` and `$uritransform` rules is probed
+   with synthetic requests through `matchAndFetchModifiers`; zero matches for a
+   modifier class that ships rules fails the gate. `$redirect`/`$redirect-rule`
+   are intentionally not probed — this ubo-core build surfaces them only through
+   `redirectEngine`, which requires an external redirect-resource engine.
 
 Output ends with `exit: PASS` / `exit: FAIL`. `npm run verify` uses the
 defaults; the GitHub workflow runs it with the concrete output path.
