@@ -392,7 +392,9 @@ let cosFail = 0;
     const domain = parseHost(firstHost, { allowPrivateDomains: true }).domain ?? firstHost;
     const out = ce.probe(firstHost, domain, `http://${firstHost}/`);
     // The engine may normalize whitespace (e.g. a space after commas inside
-    // :not()), so compare both sides through the same normalization. A specific
+    // :not()), and it reserializes attribute strings with double quotes (so a
+    // single-quoted source rule comes back as double-quoted CSS), so compare
+    // both sides through the same normalization. A specific
     // rule comes back exactly one way: declarative selectors land on their own
     // (trimmed, comma-lipped) line of injectedCSS (incl. :style() converted to
     // a CSS rule), procedural/pseudo selectors land as a JSON task whose `raw`
@@ -403,7 +405,8 @@ let cosFail = 0;
         .trim()
         .replace(/,$/, '')
         .replace(/,(?=\S)/g, ', ')
-        .replace(/\s*([>+~])\s*/g, ' $1 ');
+        .replace(/\s*([>+~])\s*/g, ' $1 ')
+        .replace(/'/g, '"'); // quote chars are interchangeable in CSS strings
     const cssLines = (out.injectedCSS ?? '')
       .split('\n')
       .map((s) => norm(s));
