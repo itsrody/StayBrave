@@ -112,6 +112,14 @@ node src/main.js --help
       "subsume_procedural": true
     }
   },
+  "provided_lists": [
+    { "name": "uBO - Ads", "url": "https://ublockorigin.github.io/uAssets/filters/filters.txt", "enabled": true },
+    { "name": "uBO - Badware risks", "url": "https://ublockorigin.github.io/uAssets/filters/badware.txt", "enabled": true },
+    { "name": "uBO - Privacy", "url": "https://ublockorigin.github.io/uAssets/filters/privacy.txt", "enabled": true },
+    { "name": "uBO - Quick fixes", "url": "https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt", "enabled": true },
+    { "name": "uBO - Unbreak", "url": "https://ublockorigin.github.io/uAssets/filters/unbreak.txt", "enabled": true },
+    { "name": "uBO - Annoyances", "url": "https://ublockorigin.github.io/uAssets/filters/annoyances.txt", "enabled": true }
+  ],
   "lists": [
     { "name": "EasyList", "url": "https://easylist.to/easylist/easylist.txt", "enabled": true },
     { "name": "StevenBlack hosts", "url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", "enabled": true, "hosts": true }
@@ -154,6 +162,16 @@ node src/main.js --help
   - `hosts` (optional, default `false`) — treat the list as hosts-file syntax:
     `#`/`!` comments dropped, IP-led or bare-domain lines become `||domain^`
     rules. Required for StevenBlack/hosts.
+- `provided_lists` (optional, default `[]`) — array of `{ name, url, enabled }`
+  describing external lists the *user* has already enabled in uBO (such as
+  uBO's built-in "Ads", "Badware risks", "Privacy", "Quick fixes", "Unbreak",
+  "Annoyances"). Every rule from StayBrave-Classic that one of these lists
+  already provides — textually identical or provably covered, see
+  `src/provided.js` — is dropped from the output, so no rule is duplicated or
+  flagged "unused" in the combined install. Coverage is unchanged relative to
+  (StayBrave-Classic + these lists). `enabled: false` disables one entry; remove
+  the whole block to keep the output self-contained for users who do not enable
+  these lists in uBO.
 
 ---
 
@@ -263,6 +281,26 @@ After exact-string dedup and deterministic sort:
   channels (simple class/id, complex token-led, generic-misc, hostname-hide,
   hostname-unhide, procedural); `tokenBucketEstimate` estimates uBO's network
   token-bucket split (hostname-tokened vs. catch-all bucket-0 rules).
+
+### 5b. Provided-list subtraction (`src/provided.js`)
+
+When `provided_lists` is non-empty, each listed URL is fetched and treated as
+already-present coverage rather than merged output. `subtractProvided` then
+drops from the optimized rules any rule one of those lists already provides:
+
+- **Exact-text** — any rule whose text appears verbatim in a provided list.
+- **Network** — an option-less `||host…` rule covered by a provided option-less
+  `||host…` rule (label-suffix host and `/`-boundary path prefix), matching
+  uBO's hostname-suffix matching.
+- **Cosmetic** — a `##`/`#?#` rule whose selector appears in a provided list on
+  a broader or equal host scope (plain `example.com` covers `www.example.com`,
+  `example.*` covers concrete hosts under it, and a plain rule covers a
+  procedural rule on the same `plainBase`).
+
+Everything kept is unchanged. This is what keeps the combined install free of
+"unused duplicate rules": StayBrave-Classic no longer ships the subset that
+uBO's other enabled lists already supply. Run `node examples/verify.js` after
+rebuilding to confirm the reduced file still compiles cleanly.
 
 ### 6. Write (`src/writer.js`)
 

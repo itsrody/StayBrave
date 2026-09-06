@@ -39,6 +39,11 @@ export function defaults() {
         subsume_procedural: true,
       },
     },
+    // External lists already enabled in uBO (uBlocks' built-ins, EasyList in
+    // the browser, …). Rules StayBrave-Classic ships that these lists already
+    // provide are dropped, so no rule is duplicated/flagged "unused". Off by
+    // default: a user who does not enable these lists keeps full coverage.
+    provided_lists: [],
     lists: [],
   };
 }
@@ -56,6 +61,7 @@ function mergeWithDefaults(cfg) {
         ...(cfg.filter?.cosmetic_cost ?? {}),
       },
     },
+    lists: [],
   };
   if (!Array.isArray(cfg.lists)) {
     throw new Error('lists.json: "lists" must be an array of list sources');
@@ -73,6 +79,27 @@ function mergeWithDefaults(cfg) {
       hosts: l.hosts ?? false,
     };
   });
+  // provided_lists are additional lists the user has enabled in uBO; each is
+  // a { name, url } source fetched like a normal list but treated as
+  // already-present coverage rather than merged output. `enabled:false` skips
+  // a provided list (¬(subtract its rules)).
+  if (cfg.provided_lists !== undefined) {
+    if (!Array.isArray(cfg.provided_lists)) {
+      throw new Error('lists.json: "provided_lists" must be an array');
+    }
+    out.provided_lists = cfg.provided_lists
+      .filter((l) => l?.enabled ?? true)
+      .map((l, i) => {
+        if (!l || !l.name || !l.url) {
+          throw new Error(
+            `lists.json: provided_lists[${i}] must have a "name" and a "url"`
+          );
+        }
+        return { name: String(l.name), url: String(l.url) };
+      });
+  } else {
+    out.provided_lists = [];
+  }
   return out;
 }
 

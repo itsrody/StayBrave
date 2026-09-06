@@ -84,6 +84,11 @@ try {
   console.log(
     `network subsumed: ${fmt(o.network_subsumed)} | scoped subsumed: ${fmt(o.scoped_subsumed)} | cosmetic subsumed: ${fmt(o.cosmetic_selectors_subsumed)} | procedural subsumed: ${fmt(o.procedural_subsumed)}`
   );
+  if (o.provided_rules > 0) {
+    console.log(
+      `provided (${o.provided_rules} rules): exact ${fmt(o.provided_exact_removed)} dropped | network-subsumed ${fmt(o.provided_network_subsumed)} | cosmetic-covered ${fmt(o.provided_cosmetic_covered)}`
+    );
+  }
   console.log(
     `sources: ${result.sourcesOk} ok / ${result.sourcesFailed} failed (${enabled} enabled, ${config.lists.length} configured)`
   );

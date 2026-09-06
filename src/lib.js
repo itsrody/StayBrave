@@ -4,7 +4,22 @@
 import { Fetcher } from './fetch.js';
 import { analyzeText, emptyStats } from './analyze.js';
 import { optimize } from './optimize.js';
+import { subtractProvided } from './provided.js';
 import { writeOutput } from './writer.js';
+
+// Collect the active rule lines of an already-enabled external list (uBO
+// built-ins, EasyList-in-browser, …): expand !#include, drop comments/headers,
+// and keep every remaining non-empty line as provided coverage.
+async function collectProvidedLines(fetcher, list) {
+  const { text } = await fetcher.fetchList(list);
+  const out = [];
+  for (const line of text.split('\n')) {
+    const t = line.trim().replace(/\s+$/, '');
+    if (t === '' || t.startsWith('!') || t.startsWith('[')) continue;
+    out.push(t);
+  }
+  return out;
+}
 
 export async function runPipeline(config, { offline = false, outputPath } = {}) {
   const fetcher = new Fetcher({ ...config.fetch, offline });
@@ -38,6 +53,31 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
   }
 
   const optimized = optimize(allRules, config.filter);
+
+  // Subtract rules already provided by external lists the user enables.
+  const providedLines = [];
+  for (const list of config.provided_lists ?? []) {
+    try {
+      providedLines.push(...(await collectProvidedLines(fetcher, list)));
+    } catch (err) {
+      process.stderr.write(
+        `[warn] provided list ${list.name}: ${err.message}\n`
+      );
+    }
+  }
+  if (providedLines.length > 0) {
+    const subtraction = subtractProvided(optimized.rules, providedLines);
+    optimized.rules = subtraction.rules;
+    optimized.provided_rules = providedLines.length;
+    optimized.provided_exact_removed = subtraction.exactRemoved.length;
+    optimized.provided_network_subsumed = subtraction.networkSubsumed;
+    optimized.provided_cosmetic_covered = subtraction.cosmeticCovered;
+  } else {
+    optimized.provided_rules = 0;
+    optimized.provided_exact_removed = 0;
+    optimized.provided_network_subsumed = 0;
+    optimized.provided_cosmetic_covered = 0;
+  }
 
   const outPath = outputPath ?? config.output.file;
   writeOutput(outPath, config.output, optimized, summaries);

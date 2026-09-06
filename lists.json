@@ -27,6 +27,14 @@
       "subsume_procedural": true
     }
   },
+  "provided_lists": [
+    { "name": "uBO - Ads", "url": "https://ublockorigin.github.io/uAssets/filters/filters.txt", "enabled": true },
+    { "name": "uBO - Badware risks", "url": "https://ublockorigin.github.io/uAssets/filters/badware.txt", "enabled": true },
+    { "name": "uBO - Privacy", "url": "https://ublockorigin.github.io/uAssets/filters/privacy.txt", "enabled": true },
+    { "name": "uBO - Quick fixes", "url": "https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt", "enabled": true },
+    { "name": "uBO - Unbreak", "url": "https://ublockorigin.github.io/uAssets/filters/unbreak.txt", "enabled": true },
+    { "name": "uBO - Annoyances", "url": "https://ublockorigin.github.io/uAssets/filters/annoyances.txt", "enabled": true }
+  ],
   "lists": [
     { "name": "EasyList", "url": "https://easylist.to/easylist/easylist.txt", "enabled": true },
     { "name": "EasyPrivacy", "url": "https://easylist.to/easylist/easyprivacy.txt", "enabled": true },
