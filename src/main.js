@@ -81,6 +81,15 @@ try {
   console.log(
     `input ${fmt(o.input_rules)} rules -> unique ${fmt(o.unique_rules)} -> final ${fmt(o.rules.length)}`
   );
+  const trustedDropped = result.summaries.reduce(
+    (n, s) => n + (s.trusted_source_dropped ?? 0),
+    0
+  );
+  if (trustedDropped > 0) {
+    console.log(
+      `trusted-source: ${fmt(trustedDropped)} rule(s) dropped (set filter.keep_trusted_only to retain)`
+    );
+  }
   console.log(
     `network subsumed: ${fmt(o.network_subsumed)} | scoped subsumed: ${fmt(o.scoped_subsumed)} | cosmetic subsumed: ${fmt(o.cosmetic_selectors_subsumed)} | procedural subsumed: ${fmt(o.procedural_subsumed)}`
   );

@@ -149,7 +149,11 @@ node src/main.js --help
     only while `scriptlets` is enabled, and `trusted-*` scriptlets are dropped
     unless `keep_trusted_only` is `true` (the pipeline parser runs
     `trustedSource:false`, matching a normal Firefox uBO).
-  - `keep_trusted_only` (default `false`).
+  - `keep_trusted_only` (default `false`) — parse with `trustedSource:false`,
+    matching a normal Firefox uBO: `trusted-*` scriptlet *blocks* and network
+    options that require trust (`$replace=`, `$uritransform`, `$urlskip`) are
+    dropped and counted under `trusted_source_dropped`. Exceptions (`#@#+js`,
+    `@@`) are exempt from the trust requirement and always kept.
   - `network_optimize` (default `true`) — run the network / scoped subsumption
     passes.
   - `cosmetic_engine_filter` (default `true`) — run the merged rules through
@@ -242,10 +246,14 @@ trusted-scriptlet check. Our `TRUSTED_SCRIPTLET_TOKENS` set is passed as the
 parser's `trustedScriptletTokens` option, so a `trusted-*` scriptlet from a
 non-trusted source is flagged `AST_ERROR.UNTRUSTED_SOURCE` by uBO's parser
 itself (dropped in Analyze) rather than by a hand-rolled mirror; the
-`trusted-` prefix check is kept as a superset safety net.
+`trusted-` prefix check is kept as a superset safety net for blocks only —
+uBO exempts *exception* scriptlets from requiring a trusted source
+(`validateExt()` breaks on `isException` first), so `#@#+js(trusted-*)` rules
+survive analysis even under `keep_trusted_only:false`, matching stock uBO.
 | `responseheader` (`^responseheader`) | Response-header modifier | kept |
 | `unsupported` | Comment/header/`$$` AdGuard cosmetics | skipped (counted) |
-| `unsupported_options` | Parseable but carries a modifier uBO rejected (`$urlskip`, `$replace`, `$dnsrewrite`, `$web_accessible_resource`, … — all the `trustedSource`/option-validation drops) | dropped (counted) |
+| `trusted_source_dropped` | Parseable but rejected because the source is not trusted (`$replace=`, `$uritransform`, `$urlskip`, trusted-`*` scriptlet blocks — uBO ignores exceptions here) | dropped (counted) |
+| `unsupported_options` | Parseable but carries a modifier uBO rejected with a *non*-trust reason (`$dnsrewrite`, `$web_accessible_resource`, unknown/duplicate options, …) | dropped (counted) |
 | `invalid` | Parser error (`astError != 0`, or the embedded `ExtSelectorCompiler` rejecting a CSS-invalid cosmetic selector such as `.bad{selector}` via `HAS_ERROR`) | dropped (counted) |
 
 Classification uses the parser's own predicates (`isNetworkFilter`,

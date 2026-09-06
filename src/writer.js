@@ -44,7 +44,7 @@ export function writeOutput(path, outputCfg, optimized, summaries) {
         s.responseheaders,
       ].join(' + ');
       chunks.push(
-        `!   [ok]   ${s.name}: ${s.bytes} bytes (+${s.included_files} included files), ${s.total_lines} lines, ${s.network_rules} network + ${s.cosmetic_rules} cosmetic rules (incl. scriptlets ${extra}), ${s.empty} empty, ${s.unsupported} unsupported, ${s.invalid} invalid, ${s.hosts_converted} hosts entries converted, ${s.scriptlets_removed} scriptlets filtered, ${s.unsupported_options} unsupported options, ${s.unsupported_cosmetic} unsupported cosmetic rules, ${s.cosmetic_transforms} rewrites`
+        `!   [ok]   ${s.name}: ${s.bytes} bytes (+${s.included_files} included files), ${s.total_lines} lines, ${s.network_rules} network + ${s.cosmetic_rules} cosmetic rules (incl. scriptlets ${extra}), ${s.empty} empty, ${s.unsupported} unsupported, ${s.invalid} invalid, ${s.hosts_converted} hosts entries converted, ${s.scriptlets_removed} scriptlets filtered, ${s.unsupported_options} unsupported options, ${s.trusted_source_dropped} trusted-source dropped, ${s.unsupported_cosmetic} unsupported cosmetic rules, ${s.cosmetic_transforms} rewrites`
       );
     } else {
       chunks.push(`!   [fail] ${s.name}: fetch failed (${s.error ?? 'unknown'})`);

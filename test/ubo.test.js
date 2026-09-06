@@ -50,12 +50,14 @@ test('trusted scriptlet is untrusted-source unless keep_trusted_only', () => {
 
 test('analyzeText drops trusted scriptlets from untrusted sources', () => {
   const filter = { keep_trusted_only: false, scriptlets: true, cosmetic_cost: {} };
-  const { lines } = analyzeText(
+  const { lines, stats } = analyzeText(
     'example.com##+js(trusted-click-element, .x)\nexample.org##+js(nacl.js)\n',
     filter,
     false
   );
   assert.deepEqual(lines, ['example.org##+js(nacl.js)']);
+  assert.equal(stats.trusted_source_dropped, 1);
+  assert.equal(stats.unsupported_options, 0);
 });
 
 test('analyzeText keeps trusted scriptlets under keep_trusted_only', () => {
@@ -66,6 +68,30 @@ test('analyzeText keeps trusted scriptlets under keep_trusted_only', () => {
     false
   );
   assert.deepEqual(lines, ['example.com##+js(trusted-click-element, .x)']);
+});
+
+test('exception trusted scriptlets are exempt from trusted-source gating', () => {
+  // uBO exempts exceptions from requiring a trusted source (validateExt
+  // breaks on isException before the trusted-token check), so `#@#+js(trusted-*)`
+  // must survive analysis even when keep_trusted_only is false.
+  const parser = makeParser({ keep_trusted_only: false });
+  const p = parseLine(parser, 'example.com#@#+js(trusted-click-element, .x)');
+  assert.equal(p.ok, true);
+  assert.equal((p.error & AST_ERROR.UNTRUSTED_SOURCE) === 0, true);
+  assert.equal(p.exception, true);
+
+  const filter = { keep_trusted_only: false, scriptlets: true, cosmetic_cost: {} };
+  const { lines, stats } = analyzeText(
+    'example.com#@#+js(trusted-click-element, .x)\n' +
+      'example.net#@#+js(trusted-set-attr, div, ping, undefined)\n',
+    filter,
+    false
+  );
+  assert.deepEqual(lines, [
+    'example.com#@#+js(trusted-click-element, .x)',
+    'example.net#@#+js(trusted-set-attr, div, ping, undefined)',
+  ]);
+  assert.equal(stats.scriptlets_removed, 0);
 });
 
 test('shared parser across sources yields the same result as per-source parsers', () => {

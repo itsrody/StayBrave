@@ -30,6 +30,7 @@ export function emptyStats() {
     scriptlets_removed: 0,
     hosts_converted: 0,
     unsupported_options: 0,
+    trusted_source_dropped: 0,
     unsupported_cosmetic: 0,
     cosmetic_transforms: 0,
     comma_lists_split: 0,
@@ -100,9 +101,12 @@ function classify(line, filter, parser, stats) {
   if (!parsed.ok) {
     const unsupportedKinds = [
       AST_ERROR.OPTION_UNKNOWN,
-      AST_ERROR.UNTRUSTED_SOURCE,
       AST_ERROR.OPTION_DUPLICATE,
     ];
+    if (parsed.error & AST_ERROR.UNTRUSTED_SOURCE) {
+      stats.trusted_source_dropped += 1;
+      return undefined;
+    }
     if (unsupportedKinds.some((bit) => parsed.error & bit)) {
       stats.unsupported_options += 1;
     } else {
@@ -134,7 +138,15 @@ function classify(line, filter, parser, stats) {
         return undefined;
       }
       const token = scriptletToken(line);
-      if (isTrustedScriptletToken(token) && filter.keep_trusted_only !== true) {
+      // uBO exempts exception scriptlets from requiring a trusted source (the
+      // parser's validateExt() breaks on isException before the trusted-token
+      // check), so `#@#+js(trusted-*)` must survive even from an untrusted
+      // list. The superset `trusted-` prefix net still applies to blocks.
+      if (
+        parsed.exception !== true &&
+        isTrustedScriptletToken(token) &&
+        filter.keep_trusted_only !== true
+      ) {
         stats.scriptlets_removed += 1;
         return undefined;
       }
