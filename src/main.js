@@ -98,6 +98,13 @@ try {
       `cosmetic engine: ${fmt(o.cosmetic_engine_dropped)} dead rule(s) dropped (stock uBO would ignore them)`
     );
   }
+  const fe = o.firefox_exclusive ?? {};
+  console.log(
+    `Firefox-exclusive: ${fmt(fe.html_filters ?? 0)} html_filters, ${fmt(fe.responseheaders ?? 0)} responseheaders, ${fmt(fe.scriptlets ?? 0)} scriptlets, ${fmt(fe.ipaddress ?? 0)} ipaddress, ${fmt(fe.cname ?? 0)} cname, ${fmt(fe.csp ?? 0)} csp` +
+      (fe.replace > 0 || fe.uritransform > 0 || fe.urlskip > 0
+        ? ` | trusted-only: ${fmt(fe.replace ?? 0)} replace, ${fmt(fe.uritransform ?? 0)} uritransform, ${fmt(fe.urlskip ?? 0)} urlskip`
+        : '')
+  );
   if (result.engineRecheck !== null && result.engineRecheck !== undefined) {
     const r = result.engineRecheck;
     console.log(

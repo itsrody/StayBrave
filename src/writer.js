@@ -68,9 +68,26 @@ export function writeOutput(path, outputCfg, optimized, summaries) {
     `! Cosmetic channels: ${optimized.simple_class_id} simple class/id, ${optimized.complex_token_led} complex token-led, ${optimized.generic_misc} generic-misc, ${optimized.hostname_hide} hostname-hide, ${optimized.hostname_unhide} hostname-unhide, ${optimized.procedural} procedural`
   );
   chunks.push('!');
+  chunks.push('! Built for Firefox uBO, where the exclusive capabilities live:');
+  chunks.push(
+    `!   ... CNAME uncloaking + $ipaddress= rules, ##^ HTML filters, ^responseheader filters, scriptlets`
+  );
+  const fe = optimized.firefox_exclusive ?? {};
+  chunks.push(
+    `! Firefox-exclusive rules shipped: ${fe.html_filters ?? 0} html_filters, ${fe.responseheaders ?? 0} responseheaders, ${fe.scriptlets ?? 0} scriptlets, ${fe.ipaddress ?? 0} ipaddress, ${fe.cname ?? 0} cname, ${fe.csp ?? 0} csp` +
+      (fe.replace > 0 || fe.uritransform > 0 || fe.urlskip > 0
+        ? ` | trusted-only: ${fe.replace ?? 0} replace, ${fe.uritransform ?? 0} uritransform, ${fe.urlskip ?? 0} urlskip`
+        : '')
+  );
   chunks.push('! Every rule below is validated by the uBlock Origin 1.74+ static-filter parser.');
   chunks.push(
-    '! Unsupported uBO scriptlet injections, trusted-only and dead syntax are removed.'
+    '! Unsupported uBO scriptlet injections, trusted-only ($replace=, $uritransform, $urlskip,'
+  );
+  chunks.push(
+    '! trusted-* scriptlets) and dead syntax are removed unless keep_trusted_only is enabled;'
+  );
+  chunks.push(
+    '! when enabled, add this list\'s URL to uBO\'s trustedListPrefixes advanced setting.'
   );
   chunks.push(
     '! Procedural cosmetic rules are rewritten into forms Firefox uBO executes'

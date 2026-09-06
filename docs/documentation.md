@@ -5,6 +5,13 @@ and optimizes Adblock-Plus / uBlock Origin filter lists (EasyList, EasyPrivacy,
 AdGuard, Fanboy, ABP, StevenBlack hosts, …) into a single, deduplicated, sorted
 `output/StayBrave-Classic.txt` for **Firefox uBlock Origin 1.74+**.
 
+Firefox uBO is the browser/blocker pair where uBO's exclusive capabilities
+exist — CNAME uncloaking, `ipaddress=` filtering, HTML filtering and
+response-body filtering all require Firefox webRequest APIs. StayBrave-Classic
+is built *to* Firefox, not merely *for* it: the pipeline preserves every rule
+only Firefox can execute, drops the rest with a per-source cause, and certifies
+coverage through uBO's own engines (see [Firefox-exclusive capabilities](#firefox-exclusive-capabilities)).
+
 Every rule in the output is validated by **uBlock Origin's own filter parser**
 (`@gorhill/ubo-core` `AstFilterParser`) and the resulting file is compiled
 through the real `StaticNetFilteringEngine` before anything can be committed. If
@@ -28,6 +35,32 @@ weight on top of uBO's defaults.
   procedural cosmetics, HTML/responseheader filters) are kept, and rules uBO
   cannot execute are dropped with per-source causes.
 - **No compilation step** — plain ESM on Node 20+, runnable anywhere.
+
+---
+
+## Firefox-exclusive capabilities
+
+uBO's own wiki is explicit: *"uBlock Origin works best on Firefox."* The
+filter-relevant reasons and how this pipeline leans into each:
+
+| Capability | Syntax | Firefox means | Pipeline stance |
+| --- | --- | --- | --- |
+| CNAME uncloaking | `$cname` | uBO resolves the DNS chain and re-filters requests whose CNAME exposes a 3rd-party server as 1st-party | `$cname` rules pass through untouched |
+| IP-address filtering | `$ipaddress=` | DNS-resolved IP available at onBeforeRequest; `lan`/`loopback`/regex/`192.168.*` values | kept, counted, never subsumed (`SUBSUMABLE_OPTIONS` whitelist) |
+| HTML filtering | `##^` | `webRequest.filterResponseData()` prunes the response body before the browser parses it | classified `html`, preserved; opaque to cosmetic passes |
+| Response-header filtering | `##^responseheader(n: v)` | header removal/modification only possible with Firefox webRequest | classified `responseheader`, preserved |
+| Response-body filtering | `$replace=` | `filterResponseData()`-based rewrite of CSS/JS/HTML bodies | trusted-source-only: shipped only under `filter.keep_trusted_only` |
+
+Every build reports these counts (`html_filters`, `responseheaders`, `scriptlets`,
+`ipaddress`, `cname`, `csp`) in the output header and the CLI summary, so the
+Firefox-exclusive payload is visible at a glance (`firefox_exclusive` on the
+optimized result; `countFirefoxExclusives` in `src/optimize.js`).
+
+`$replace=`, `$uritransform`, `$urlskip` require a trusted-source origin. uBO
+grants trust by URL prefix — **not** by an in-list directive — through the
+advanced setting `trustedListPrefixes`. To ship those rules: set
+`filter.keep_trusted_only: true` and add this list's URL to
+`trustedListPrefixes`; the writer header reminds the operator either way.
 
 ---
 
@@ -515,7 +548,11 @@ defaults; the GitHub workflow runs it with the concrete output path.
   `output/StayBrave-Classic.txt` in uBO (Customize → My filters, or the
   "Import and apply from file" option).
 - **Trusted/advanced mode output** — toggle `filter.keep_trusted_only` to
-  retain `trusted-*` scriptlets (and parse with `trustedSource:true`).
+  retain `trusted-*` scriptlets, `$replace=`, `$uritransform`, `$urlskip`
+  (paring with `trustedSource:true`). Because uBO grants trust by URL prefix,
+  also add this list's URL to the advanced setting `trustedListPrefixes` or
+  the browser will flag those rules invalid at load. Exception rules
+  (`#@#+js`, `@@`) are exempt from the trust requirement and always kept.
 
 Browser target is Firefox uBO 1.74+; a Chromium variant would swap the
 preprocessor environment tokens and re-run Verify's request-type matrix.
