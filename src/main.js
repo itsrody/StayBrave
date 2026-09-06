@@ -84,6 +84,11 @@ try {
   console.log(
     `network subsumed: ${fmt(o.network_subsumed)} | scoped subsumed: ${fmt(o.scoped_subsumed)} | cosmetic subsumed: ${fmt(o.cosmetic_selectors_subsumed)} | procedural subsumed: ${fmt(o.procedural_subsumed)}`
   );
+  if (o.cosmetic_engine_dropped > 0) {
+    console.log(
+      `cosmetic engine: ${fmt(o.cosmetic_engine_dropped)} dead rule(s) dropped (stock uBO would ignore them)`
+    );
+  }
   if (result.engineRecheck !== null && result.engineRecheck !== undefined) {
     const r = result.engineRecheck;
     console.log(

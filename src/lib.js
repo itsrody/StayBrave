@@ -6,6 +6,7 @@ import { analyzeText, emptyStats } from './analyze.js';
 import { makeParser, TRUSTED_SCRIPTLET_TOKENS } from './ubo.js';
 import { optimize } from './optimize.js';
 import { verifyRemovedCoverage } from './engine.js';
+import { detectDroppedCosmetics } from './cosmetic-engine.js';
 import { subtractProvided } from './provided.js';
 import { writeOutput } from './writer.js';
 
@@ -64,6 +65,23 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
   }
 
   const optimized = optimize(allRules, config.filter);
+
+  // Cosmetic engine filtering: run the merged, optimizer-kept rules through the
+  // vendored uBO cosmetic engine and drop the ones stock uBO would discard at
+  // list load (generic procedural `##` with the default
+  // allowGenericProceduralFilters=false). Such rules are dead on every
+  // Firefox uBO install, so shipping them is pure weight.
+  let cosmeticDroppedCount = 0;
+  if (config.filter.cosmetic_engine_filter) {
+    const dropped = await detectDroppedCosmetics(optimized.rules, {
+      name: config.output.title,
+    });
+    if (dropped.size > 0) {
+      cosmeticDroppedCount = dropped.size;
+      optimized.rules = optimized.rules.filter((l) => !dropped.has(l));
+    }
+  }
+  optimized.cosmetic_engine_dropped = cosmeticDroppedCount;
 
   // Engine-certify the optimizer: prove the rules our subsumption passes
   // removed are still blocked by the survivors, through uBO's own SNFE. Any

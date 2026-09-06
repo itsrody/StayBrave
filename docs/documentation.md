@@ -34,12 +34,12 @@ weight on top of uBO's defaults.
 ## Pipeline
 
 ```
-lists.json ──▶ Fetch ──▶ Preprocess ──▶ Normalize ──▶ Analyze ──▶ Optimize ──▶ Write
-             (fetch)    (preprocess)  (normalize)  (analyze)  (optimize)   (writer)
-                │             │             │            │          │            │
-             concurrent   !#if/!#else   hosts→||^,  uBO's own   dedup +    ABP header +
-             HTTP + ETag   !#include     redirect   parser      sort +     provenance
-             cache         whitelist     aliases    validation  subsumption stats
+lists.json ──▶ Fetch ──▶ Preprocess ──▶ Normalize ──▶ Analyze ──▶ Optimize ──▶ Cosmetics ──▶ Write
+             (fetch)    (preprocess)  (normalize)  (analyze)  (optimize)  (cosmetic-   (writer)
+                │            │              │            │          │        engine)         │
+             concurrent  !#if/!#else  hosts→||^,   uBO's own   dedup +    abort rules    ABP header +
+             HTTP + ETag  !#include   redirect     parser      sort +     uBO would     provenance
+             cache        whitelist   aliases      validation  subsumption drop at load  stats
 ```
 
 | Stage | Module | Responsibility |
@@ -49,6 +49,7 @@ lists.json ──▶ Fetch ──▶ Preprocess ──▶ Normalize ──▶ An
 | Normalize | `src/normalize.js` | Translates cross-family syntax: hosts files to `||domain^`, strips hosting IP comments, drops `localhost` aliases, canonicalizes uBO/ABP redirect resource aliases. uBO-native `$empty`/`$mp4` pass through unchanged. |
 | Analyze | `src/ubo.js` + `src/analyze.js` | Parses every line with uBO's own `AstFilterParser` (`trustedSource:false`, exactly like uBO 1.74+) and classifies results into statistics. Applies the cosmetic preprocessing uBO itself performs (dead-operator detection, procedural rewrite). |
 | Optimize | `src/optimize.js` + `src/network.js` + `src/cosmetic.js` | Removes exact duplicates, sorts deterministically, applies provable network + cosmetic subsumption passes, and reports channel / token-bucket diagnostics. |
+| Cosmetics | `src/cosmetic-engine.js` + `vendor/ubo/` | Runs every `##`/`#@#` rule through uBO's vendored `CosmeticFilteringEngine` (identical parser + writer/reader) and removes the rules stock uBO drops at load — the generic procedural filters that `allowGenericProceduralFilters:false` discards. `filter.cosmetic_engine_filter` gates the pass (default on). |
 | Recheck | `src/engine.js` | Compiles the survivors through uBO's `StaticNetFilteringEngine` and certifies that nothing the Optimize passes removed still needs to block — any coverage hole aborts the build. |
 | Write | `src/writer.js` | Emits `output/StayBrave-Classic.txt` with a full provenance/statistics header. |
 | Config | `src/config.js` | Validates `lists.json`, merges defaults. |
@@ -151,6 +152,9 @@ node src/main.js --help
   - `keep_trusted_only` (default `false`).
   - `network_optimize` (default `true`) — run the network / scoped subsumption
     passes.
+  - `cosmetic_engine_filter` (default `true`) — run the merged rules through
+    uBO's vendored cosmetic engine and drop the generic procedural filters
+    stock uBO discards at load (see 5c).
   - `cosmetic_cost` — independent toggles for the cosmetic passes
     (`split_comma_lists` default off — pure-CSS comma lists are canonicalized
     to grouped form instead of split; `subsume_selectors`, `subsume_procedural`
@@ -338,7 +342,25 @@ Everything kept is unchanged. This is what keeps the combined install free of
 uBO's other enabled lists already supply. Run `node examples/verify.js` after
 rebuilding to confirm the reduced file still compiles cleanly.
 
-### 6. Write (`src/writer.js`)
+### 5c. Cosmetic engine filtering (`src/cosmetic-engine.js`, `vendor/ubo/`)
+
+The optimizer is network-truth; the cosmetic half is validated against the real
+uBO cosmetic engine. `@gorhill/ubo-core` ships no `cosmetic-filtering.js`, so
+uBO's own is vendored (byte-for-byte, pinned commit `869e052a…`, see
+`vendor/ubo/README`), wired to Node through three tiny shims (`vAPI`,
+`logger.js`, `background.js` — the latter fixes
+`allowGenericProceduralFilters:false`, the stock Firefox default). The build
+then does what uBO itself does on each list: `AstFilterParser` → `engine.compile`
+→ `CompiledListWriter` → `CompiledListReader` → `engine.fromCompiledContent`.
+
+That surfaces every rule stock uBO will discard at list load — the **generic
+procedural cosmetic filters** (`##div:has(…)`, `##foo:style(…)` with no
+positive host). None of them ever runs in a default uBO, so the pass removes
+them from the output (`filter.cosmetic_engine_filter`, default on) and the
+build logs how many were dropped. Host-anchored procedural filters, entity
+(`a.*`) rules and `#@#` exceptions all compile and stay.
+
+### 5d. Write (`src/writer.js`)
 
 Output starts with `[Adblock Plus 2.0]` and the ABP metadata header (`! Title`,
 `! Version: YYYYMMDDHHMM`, `! Description`, `! Expires: 3 days`, `! Homepage`,
@@ -349,8 +371,9 @@ Output starts with `[Adblock Plus 2.0]` and the ABP metadata header (`! Title`,
   unsupported-options counts, hosts converted, and whether it came from cache.
 - Global totals: input rules, unique rules, duplicates removed, network / scoped
   / cosmetic / procedural subsumed, redirect rewrites, cosmetic transforms,
-  wildcard-TLD `$domain` rules, the token-bucket split, and the cosmetic
-  channel distribution.
+  wildcard-TLD `$domain` rules, the token-bucket split, the cosmetic
+  channel distribution, and the count of dead cosmetic rules the engine pass
+  removed.
 
 `Version` is the generation timestamp (UTC, EasyList-style), so every build is
 monotonic and uBO only re-downloads on change.
@@ -376,6 +399,12 @@ monotonic and uBO only re-downloads on change.
   matches uBO's own limit that generic scriptlet injection is meaningless
   without a hostscope and that `trusted-*` scriptlets need the advanced
   mode.
+- **Generic procedural cosmetic filters are removed by the engine pass** —
+  `##div:has(…)`, `##foo:style(…)` and friends with no positive host are dead
+  in a default Firefox uBO (`allowGenericProceduralFilters:false`), so
+  `src/cosmetic-engine.js` compiles every `##`/`#@#` rule with uBO's own
+  engine at build time and drops the ones it refuses to load. Host-anchored
+  procedural rules stay.
 - **Cosmetic section separators are not written.** Adblock-style `[Section]`
   headers would be parsed as network filters, so sections are omitted; the
   list is one flat sorted set.
@@ -439,14 +468,29 @@ node examples/verify.js [output] [probeLimit]
    i.e. the origin-scoped `$csp=`/`$permissions=`/`$denyallow=`/`$popup,_3p`
    family uBO must test per request) versus a rewritable defect (a bare
    tokenless pattern such as `*xyz*` with no scoping). Any ENTIRELY rewritable
-   defect fails the gate — a rule is only allowed to be always-tested when it
-   is genuinely uBO-native policy. `src/tokens.js` mirrors the engine's
-   token-derivation (pattern runs, `$removeparam` values, regex literals) and
-   asserts `BAD_TOKENS` byte-parity with the pinned engine source, so a
-   ubo-core bump that re-collates the histogram fails loudly. Current output:
-   427,626 of 427,712 units (99.980%) ride the cheap hostname-dict / origin-dict
-   / tokenized lanes; the 86 `NO_TOKEN_HASH` units are the 56 origin-scoped
-   policy rules (0 rewritable defects).
+defect fails the gate — a rule is only allowed to be always-tested when it
+    is genuinely uBO-native policy. `src/tokens.js` mirrors the engine's
+    token-derivation (pattern runs, `$removeparam` values, regex literals) and
+    asserts `BAD_TOKENS` byte-parity with the pinned engine source, so a
+    ubo-core bump that re-collates the histogram fails loudly. Current output:
+    427,619 of 427,705 units (99.980%) ride the cheap hostname-dict / origin-dict
+    / tokenized lanes; the 86 `NO_TOKEN_HASH` units are the 56 origin-scoped
+    policy rules (0 rewritable defects).
+7. **Cosmetic engine gate** — every `##`/`#@#` line is compiled through the
+   vendored uBO `CosmeticFilteringEngine` (the same parser + writer/reader uBO's
+   filterset uses). Any line the engine drops — a generic procedural filter under
+   the stock `allowGenericProceduralFilters:false` — fails the gate: the build
+   pass already removed them, so one reaching Verify means the pipeline and the
+   engine disagree on the output. The run also reports the registration metric
+   the consumer uBO uses (`getFilterCount()`): units registered vs cosmetic
+   lines compiled, accepted and engine-dedup counts, and `0 dropped`.
+8. **Cosmetic liveness probes** — a strided sample of host-anchored hides is
+   retrieved with the exact `retrieveSpecificSelectors` call uBO makes at
+   `webNavigation.onCommitted` (synthetic frame URL, `dontInject:true`, no
+   tab). A declarative selector that does not come back in the injected-CSS
+   selector list, or a procedural/`:style()` rule whose raw selector is not in
+   the engine's procedural output, means the optimizer dropped or reworded it
+   and it no longer runs — any miss fails the gate.
 
 Output ends with `exit: PASS` / `exit: FAIL`. `npm run verify` uses the
 defaults; the GitHub workflow runs it with the concrete output path.
@@ -474,4 +518,8 @@ preprocessor environment tokens and re-run Verify's request-type matrix.
 
 MPL-2.0 (this tool and the generated list). The `@gorhill/ubo-core` dependency
 used for validation is GPL-3.0 and is only an orchestration-time dependency —
-it is not shipped, bundled, or linked into the generated list.
+it is not shipped, bundled, or linked into the generated list. Likewise the
+vendored uBO cosmetic engine under `vendor/ubo/` is unmodified GPL-3.0
+upstream source (pinned in `vendor/ubo/README`, wired to Node solely through
+local shims); it is used at build/verify time only and nothing from it is
+bundled into `output/StayBrave-Classic.txt`.

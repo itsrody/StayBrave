@@ -1,0 +1,32 @@
+# Vendor: uBO cosmetic filtering engine
+
+`cosmetic-filtering.js`, `static-ext-filtering-db.js` and `mrucache.js` are
+byte-for-byte copies of uBlock Origin source, pinned to commit
+`869e052a2d52ffc58dab89d96e2ce9406970fce3` (master, uBO 1.74-dev era):
+
+- https://raw.githubusercontent.com/gorhill/uBlock/869e052a2d52ffc58dab89d96e2ce9406970fce3/src/js/cosmetic-filtering.js
+- https://raw.githubusercontent.com/gorhill/uBlock/869e052a2d52ffc58dab89d96e2ce9406970fce3/src/js/static-ext-filtering-db.js
+- https://raw.githubusercontent.com/gorhill/uBlock/869e052a2d52ffc58dab89d96e2ce9406970fce3/src/js/mrucache.js
+
+They are wired to this Node pipeline entirely through the untouched ESM import
+graph plus the three local shims below (uBO is an extension; these are its
+host-probe hooks):
+
+| shim                  | upstream import     | what it provides here                                    |
+| --------------------- | ------------------- | -------------------------------------------------------- |
+| `background.js`       | `./background.js`   | `µb.hiddenSettings.allowGenericProceduralFilters: false` |
+| `logger.js`           | `./logger.js`       | records `logger.writeOne()` compile drops                |
+| `uri-utils.js`        | `./uri-utils.js`    | `entityFromHostname` (master logic, string-only)         |
+
+`vAPI` is injected as a global before the module is imported
+(`src/cosmetic-engine.js`) with a no-op `defer` timer and `tabs.insertCSS`,
+mirroring the promise of ubo-core's own `keyvalStore`/`vAPI` guards: the
+pipelin’e engine probes never touch a browser tab, and retrieval is always
+called with `dontInject:true` and no `tabId`.
+
+The npm-pinned `static-filtering-parser.js` (AstFilterParser) and
+`static-filtering-io.js` (CompiledListWriter/Reader) are shared directly with
+the network engine — the cosmetic engine never needed its own copies.
+
+To re-vendor after a ubo-core bump, re-run the same three upstream raw file
+URLs at the new pin, update this note, and re-run `test/cosmetic-engine.test.js`.

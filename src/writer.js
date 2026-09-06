@@ -56,6 +56,9 @@ export function writeOutput(path, outputCfg, optimized, summaries) {
     `! Input rules: ${optimized.input_rules} | Unique output: ${optimized.unique_rules} | Final output: ${optimized.rules.length} | Duplicates removed: ${optimized.duplicates_removed} | Cosmetic subsumed: ${optimized.cosmetic_selectors_subsumed} | Procedural subsumed: ${optimized.procedural_subsumed} | Network subsumed: ${optimized.network_subsumed}`
   );
   chunks.push(
+    `! Engine-filtered cosmetics (dead in stock uBO): ${optimized.cosmetic_engine_dropped ?? 0}`
+  );
+  chunks.push(
     `! Wildcard-TLD $domain rules (kept to avoid broadening): ${optimized.wildcard_domain_rules}`
   );
   chunks.push(

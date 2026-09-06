@@ -11,6 +11,9 @@
 // profile straight from the engine's own bucket histogram (which of the
 // onBeforeRequest lanes each network unit is stored on: hostname/just-origin
 // dictionaries, tokenized patterns, or the always-tested NO_TOKEN_HASH lane).
+// It also compiles the cosmetic half through the vendored uBO cosmetic engine
+// (same parser + writer/reader uBO uses) and probes that sampled cosmetic
+// rules still yield selectors the engine would inject, so nothing ships dead.
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -18,6 +21,8 @@ import { StaticNetFilteringEngine } from '@gorhill/ubo-core';
 import snfe from '@gorhill/ubo-core/js/static-net-filtering.js';
 import { AstFilterParser } from '@gorhill/ubo-core/js/static-filtering-parser.js';
 import { parseSimpleRule } from '../src/network.js';
+import { makeCosmeticEngine } from '../src/cosmetic-engine.js';
+import { parse as parseHost } from 'tldts';
 import {
   mirrorTokenFromPattern,
   mirrorTokenFromQuerypruneValue,
@@ -50,6 +55,9 @@ const modifierProbes = { removeparam: [], csp: [], permissions: [], uritransform
 // rule is inherent policy (pattern `*`, regex without a derivable token, or any
 // scoped option) or a rewritable defect (bare tokenless pattern like `*xyz*`).
 const ruleLint = { policy: 0, fixable: 0 };
+// Cosmetic lines (`##` / `#@#`, never `#?#` strong / scriptlet / HTML) fed to
+// the vendored cosmetic engine after the network sections.
+const cosmeticEngineLines = [];
 
 function hostFromHostAnchor(line) {
   const rest = line.slice(2);
@@ -168,6 +176,8 @@ for (const line of rules) {
         else ruleLint.fixable += 1;
       }
     }
+  } else if (parser.isCosmeticFilter() && line.includes('#?#') === false) {
+    cosmeticEngineLines.push(line);
   }
 }
 
@@ -334,6 +344,99 @@ if (modOkTotal + modFailTotal + modSkipTotal > 0) {
   const sk = modSkipTotal > 0 ? `, ${modSkipTotal} skipped` : '';
   console.log(`modifier probes: ${modOkTotal} matched / ${modFailTotal} failed${sk}`);
 }
+
+// Cosmetic engine gate: compile every cosmetic line (`##`, `#@#`) through the
+// vendored uBO cosmetic engine using the exact parser + writer/reader uBO's
+// filterset uses. With the stock allowGenericProceduralFilters=false, generic
+// procedural rules (`##div:has(…)`) are dropped at list load; the build pass
+// removes them, so any that reach this gate are a pipeline failure.
+const ce = await makeCosmeticEngine(cosmeticEngineLines, {
+  name: outputPath,
+});
+console.log(
+  `cosmetic engine: ${ce.units} units registered vs ${cosmeticEngineLines.length} cosmetic lines ` +
+  `(${ce.accepted} accepted, ${ce.discarded} engine-dedup, ${ce.dropped.length} dropped)`
+);
+if (ce.dropped.length > 0) {
+  console.error(
+    `cosmetic engine: ${ce.dropped.length} cosmetic rule(s) would be dropped by stock uBO ` +
+      `(generic procedural filters with default allowGenericProceduralFilters=false)`
+  );
+  for (const m of ce.dropped.slice(0, 5)) console.error('  ', m.text);
+  process.exitCode = 1;
+}
+
+// Cosmetic liveness probes: sample host-anchored hides and prove the engine
+// returns the rule for a synthetic frame URL (the retrieve() path uBO runs at
+// webNavigation.onCommitted). Declarative selectors must appear in the
+// injected-CSS selector set; procedural selectors must come back as a JSON
+// task list whose `raw` equals the rule's selector. A missing selector means
+// the optimizer dropped/reworded it and it no longer runs.
+let cosOk = 0;
+let cosFail = 0;
+{
+  const stride =
+    cosmeticEngineLines.length > probeLimit
+      ? Math.ceil(cosmeticEngineLines.length / probeLimit)
+      : 1;
+  for (let i = 0; i < cosmeticEngineLines.length && cosOk + cosFail < probeLimit; i += stride) {
+    const line = cosmeticEngineLines[i];
+    if (line.includes('#@#')) continue;
+    const idx = line.indexOf('##');
+    const hostPart = line.slice(0, idx);
+    if (hostPart === '' || hostPart.startsWith('~')) continue;
+    const firstHost = hostPart.split(',')[0].trim();
+    if (!/^[a-z0-9][a-z0-9.-]*$/.test(firstHost)) continue;
+    const selector = line.slice(idx + 2);
+    if (selector === '') continue;
+    const domain = parseHost(firstHost, { allowPrivateDomains: true }).domain ?? firstHost;
+    const out = ce.probe(firstHost, domain, `http://${firstHost}/`);
+    // The engine may normalize whitespace (e.g. a space after commas inside
+    // :not()), so compare both sides through the same normalization. A specific
+    // rule comes back exactly one way: declarative selectors land on their own
+    // (trimmed, comma-lipped) line of injectedCSS (incl. :style() converted to
+    // a CSS rule), procedural/pseudo selectors land as a JSON task whose `raw`
+    // is the rule selector. Route by what the engine actually returned, not by
+    // a local classification that may disagree with the engine's.
+    const norm = (s) =>
+      s
+        .trim()
+        .replace(/,$/, '')
+        .replace(/,(?=\S)/g, ', ')
+        .replace(/\s*([>+~])\s*/g, ' $1 ');
+    const cssLines = (out.injectedCSS ?? '')
+      .split('\n')
+      .map((s) => norm(s));
+    const rawProcs = (out.proceduralFilters ?? []).map((p) => {
+      try {
+        return norm(JSON.parse(p).raw);
+      } catch {
+        return null;
+      }
+    });
+    const rawConverted = (out.convertedProceduralFilters ?? []).map((p) => {
+      try {
+        return norm(JSON.parse(p).raw);
+      } catch {
+        return null;
+      }
+    });
+    const present =
+      cssLines.includes(norm(selector)) ||
+      rawProcs.includes(norm(selector)) ||
+      rawConverted.includes(norm(selector));
+    if (present) {
+      cosOk += 1;
+    } else {
+      cosFail += 1;
+      if (cosFail <= 5) console.error('  cosmetic not retrieved:', line);
+    }
+  }
+}
+console.log(
+  `cosmetic liveness probes: ${cosOk} present / ${cosFail} missing (of ${cosOk + cosFail} probed)`
+);
+if (cosFail > 0) process.exitCode = 1;
 
 const kinds2 = { network: kindCounts.network, cosmetic: kindCounts.cosmetic };
 console.log(

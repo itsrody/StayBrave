@@ -33,6 +33,7 @@ export function defaults() {
       scriptlets: true,
       keep_trusted_only: false,
       network_optimize: true,
+      cosmetic_engine_filter: true,
       cosmetic_cost: {
         split_comma_lists: false,
         subsume_selectors: true,
