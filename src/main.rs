@@ -11,7 +11,7 @@ use std::path::PathBuf;
 #[command(
     name = "staybrave",
     version,
-    about = "Fetch, analyze, and optimize adblock-rust filter lists into a single sorted StayBrave.txt"
+    about = "Fetch, analyze, and optimize adblock-rust filter lists into a single sorted StayBrave-Classic.txt"
 )]
 struct Cli {
     #[arg(short, long, default_value = "lists.toml")]

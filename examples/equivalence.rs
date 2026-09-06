@@ -303,7 +303,7 @@ fn check_corpus(before: &Engine, after: &Engine, urls: &[String]) -> (usize, usi
 fn main() -> anyhow::Result<()> {
     let out_path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "StayBrave.txt".into());
+        .unwrap_or_else(|| "StayBrave-Classic.txt".into());
 
     let t0 = Instant::now();
     let mut lines: Vec<String> = std::fs::read_to_string(&out_path)?

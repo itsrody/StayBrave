@@ -5,7 +5,7 @@ fn main() {
     let path = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("StayBrave.txt"));
+        .unwrap_or_else(|| PathBuf::from("StayBrave-Classic.txt"));
 
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));

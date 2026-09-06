@@ -335,7 +335,7 @@ fn find_cosmetic_contamination(lines: &[String]) -> Vec<String> {
 fn main() -> anyhow::Result<()> {
     let out_path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "StayBrave.txt".into());
+        .unwrap_or_else(|| "StayBrave-Classic.txt".into());
     let sample: usize = std::env::var("VERIFY_SAMPLE")
         .ok()
         .and_then(|s| s.parse().ok())
