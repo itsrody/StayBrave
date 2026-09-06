@@ -4,9 +4,14 @@
 // engine internals.
 //
 // On Firefox uBO blocks every request synchronously in
-// `webRequest.onBeforeRequest`. The engine dispatches a URL through two lanes:
-//   - pure hostname dictionary (option-less `||host^`/bare `host`) -- the
-//     DOT_TOKEN_HASH lane, probed without tokenizing the URL at all;
+// `webRequest.onBeforeRequest`. The engine dispatches a URL through lanes:
+//   - pure hostname dictionary -- the DOT_TOKEN_HASH lane, probed without
+//     tokenizing the URL at all. Any hostname-anchored pattern rides it, even
+//     with type/party-only options (`||host^$image`, `||host^$3p`) because
+//     those options never set `optionUnitBits`;
+//   - just-origin dictionary -- the ANY_TOKEN_HASH / ANY_HTTPS / ANY_HTTP
+//     lanes (`FilterJustOrigin`): `*$domain=…` and `|http(s|*)://$domain=…`
+//     store one entry per `domain=` value;
 //   - tokenized patterns -- the URL is tokenized once and only filters whose
 //     extracted token is present in the URL are evaluated.
 // A rule's token is its lowest-"badness" run of [%0-9A-Za-z]+ (cap 7 chars),
@@ -15,7 +20,15 @@
 // they are present in many URLs, so their rule is tested on many requests.
 // A rule with no derivable token (e.g. `*ads*`, whose run is abutted by `*`
 // on both sides) is the engine's worst case: it is matched against every
-// request of its type.
+// request of its type (NO_TOKEN_HASH lane) unless it is origin-scoped policy
+// (`$csp=` / `$permissions=` / `$denyallow=` / `$popup` with `$domain`), which
+// uBO natively tests per request and cannot be rewritten without changing
+// semantics.
+//
+// These mirrors feed examples/verify.js; the authoritative dispatch profile
+// there is derived from the engine's own bucketHistogram() -- the mirrors only
+// decide whether an always-tested rule is inherent policy or a rewritable
+// defect.
 
 export const MAX_TOKEN_LENGTH = 7;
 
@@ -131,6 +144,42 @@ const reToken = /[%0-9A-Za-z]+/g;
 
 function badness(token) {
   return token.length > 1 ? BAD_TOKENS.get(token) || 0 : 1;
+}
+
+// Mirror of FilterCompiler#extractTokenFromQuerypruneValue(): when the pattern
+// is `*` and the rule is a removeparam, uBO derives a token from the
+// removeparam value itself, giving it a token lane.  Returns null when no
+// token can be extracted (the rule stays in NO_TOKEN_HASH lane).
+export function mirrorTokenFromQuerypruneValue(value) {
+  if (value === '*' || value.charCodeAt(0) === 0x7e /* '~' */) return null;
+  const regexMatch = /^\/(.+)\/i?$/.exec(value);
+  if (regexMatch !== null) {
+    return mirrorTokenFromRegex(regexMatch[1].replace(/(\{\d*)\\,/, '$1,'));
+  }
+  if (value.startsWith('|')) {
+    return mirrorTokenFromRegex('\\b' + value.slice(1));
+  }
+  return mirrorTokenFromPattern(value.toLowerCase());
+}
+
+// Pragmatic mirror of FilterCompiler#extractTokenFromRegex().  Strips
+// character classes, regex escapes, non-capturing groups, and quantifiers
+// then runs the same lowest-badness token selection.  Not a perfect mirror
+// of the engine's regex-analyzer-backed toTokenizableStr (some literal runs
+// get lost), but captures the vast majority of real-world list regexes which
+// contain plain `/literal/` segments.  Marked "(mirror)" in output.
+export function mirrorTokenFromRegex(pattern) {
+  let s = pattern
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/\(\?:/g, ' ')
+    .replace(/\\[dDwWsSbB]/g, ' ')
+    .replace(/\\./g, ' ')
+    .replace(/[^%0-9A-Za-z]+/g, ' ')
+    .trim();
+  const t = mirrorTokenFromPattern(s);
+  if (t === null) return null;
+  if (t.token === s || t.token.length === 1) return t;
+  return { token: t.token.toLowerCase(), badness: t.badness };
 }
 
 // Mirror of FilterCompiler#extractTokenFromPattern(): the lowest-badness run,

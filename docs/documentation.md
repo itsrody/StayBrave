@@ -423,19 +423,30 @@ node examples/verify.js [output] [probeLimit]
    modifier class that ships rules fails the gate. `$redirect`/`$redirect-rule`
    are intentionally not probed — this ubo-core build surfaces them only through
    `redirectEngine`, which requires an external redirect-resource engine.
-6. **Token profile** (informational) — every network rule is classified into
-   uBO's onBeforeRequest dispatch lanes via `src/tokens.js`, a mirror of
-   `FilterCompiler#makeToken`: pure hostname-dictionary (`||host^` / bare
-   `host`, probed without URL tokenization), distinctive-token (lowest-badness
-   run of `[%0-9A-Za-z]+`, matched only when that token is in the URL),
-   generic-token (in the engine's collated `badTokens` histogram, e.g. `cdn`,
-   `www`), 1-char-token, tokenless (`*ads*` — tested on every request), and
-   regex (token not mirrored). `BAD_TOKENS` parity with the pinned engine
-   source is asserted in `test/tokens.test.js`, so a ubo-core bump that
-   re-collates the histogram fails loudly. The formula this measures: rules
-   should be hostname-anchored, carry a distinctive token in their pattern, and
-   never abut a wildcard with their token run. Current output: 422,391 of
-   423,059 network rules (99.8%) are dispatch-cheap.
+6. **Dispatch profile** (informational) — after compilation the engine's own
+   `bucketHistogram()` enumerates every registered network unit and the token
+   hash it is stored under in its realm bucket. That is uBO's actual
+   onBeforeRequest dispatch: `DOT_TOKEN_HASH` + `FilterHostnameDict` (pure
+   hostname dictionary, including type/party-only rules like `||host^$image` —
+   those options never set `optionUnitBits`), `ANY/ANY_HTTPS/ANY_HTTP_TOKEN_HASH`
+   + `FilterJustOrigin*` (the just-origin dictionary: `*$domain=…` and
+   `|http(s|*)://$domain=…`), every other hash a tokenized pattern (one bucket
+   per token, reached only when that token appears in the URL), and
+   `NO_TOKEN_HASH` (tested on every request). No mirror is involved — this is
+   the dispatch surface the engine really probes. A complementary **rule lint**
+   classifies every network rule that would land in `NO_TOKEN_HASH`: inherent
+   policy (pattern `*`, regex without a tokenizable literal, any scoped option,
+   i.e. the origin-scoped `$csp=`/`$permissions=`/`$denyallow=`/`$popup,_3p`
+   family uBO must test per request) versus a rewritable defect (a bare
+   tokenless pattern such as `*xyz*` with no scoping). Any ENTIRELY rewritable
+   defect fails the gate — a rule is only allowed to be always-tested when it
+   is genuinely uBO-native policy. `src/tokens.js` mirrors the engine's
+   token-derivation (pattern runs, `$removeparam` values, regex literals) and
+   asserts `BAD_TOKENS` byte-parity with the pinned engine source, so a
+   ubo-core bump that re-collates the histogram fails loudly. Current output:
+   427,626 of 427,712 units (99.980%) ride the cheap hostname-dict / origin-dict
+   / tokenized lanes; the 86 `NO_TOKEN_HASH` units are the 56 origin-scoped
+   policy rules (0 rewritable defects).
 
 Output ends with `exit: PASS` / `exit: FAIL`. `npm run verify` uses the
 defaults; the GitHub workflow runs it with the concrete output path.

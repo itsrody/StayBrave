@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { BAD_TOKENS, MAX_TOKEN_LENGTH, mirrorTokenFromPattern } from '../src/tokens.js';
+import { BAD_TOKENS, MAX_TOKEN_LENGTH, mirrorTokenFromPattern, mirrorTokenFromQuerypruneValue, mirrorTokenFromRegex } from '../src/tokens.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -67,4 +67,32 @@ test('a 1-char winner is flagged as short', () => {
 
 test('MAX_TOKEN_LENGTH mirrors the engine cap', () => {
   assert.equal(MAX_TOKEN_LENGTH, 7);
+});
+
+test('queryprune value derives a token, matching extractTokenFromQuerypruneValue', () => {
+  assert.deepEqual(mirrorTokenFromQuerypruneValue('gclid'), {
+    token: 'gclid',
+    badness: 0,
+  });
+  // `*` and `~` values never yield a token.
+  assert.equal(mirrorTokenFromQuerypruneValue('*'), null);
+  assert.equal(mirrorTokenFromQuerypruneValue('~utm_*'), null);
+});
+
+test('queryprune regex value routes through the regex mirror', () => {
+  const t = mirrorTokenFromQuerypruneValue('/ad\\d+/');
+  assert.notEqual(t, null);
+  assert.equal(t.token, 'ad');
+});
+
+test('regex mirror recovers a literal token when one exists', () => {
+  // Zero-badness run (example) beats the later banner run, engine order.
+  assert.deepEqual(mirrorTokenFromRegex('/.example/banner/[0-9]+.js$/'), {
+    token: 'example',
+    badness: 0,
+  });
+});
+
+test('regex mirror returns null when no tokenizable literal remains', () => {
+  assert.equal(mirrorTokenFromRegex('[A-z0-9]+[-_]?[0-9]+'), null);
 });

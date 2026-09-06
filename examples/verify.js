@@ -5,9 +5,12 @@
 // simple option-less network rules with synthetic requests to prove they are
 // live (nothing was over-staticized/dropped by the optimizer). Also reports
 // how many network units the engine actually registers (getFilterCount, the
-// same number uBO's dashboard "used" counter derives from) and proves that
+// same number uBO's dashboard "used" counter derives from), proves that
 // supported modifier rules ($removeparam, $csp, $permissions, $uritransform)
-// answer through the engine's modifier APIs.
+// answer through the engine's modifier APIs, and derives the dispatch-lane
+// profile straight from the engine's own bucket histogram (which of the
+// onBeforeRequest lanes each network unit is stored on: hostname/just-origin
+// dictionaries, tokenized patterns, or the always-tested NO_TOKEN_HASH lane).
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -15,7 +18,14 @@ import { StaticNetFilteringEngine } from '@gorhill/ubo-core';
 import snfe from '@gorhill/ubo-core/js/static-net-filtering.js';
 import { AstFilterParser } from '@gorhill/ubo-core/js/static-filtering-parser.js';
 import { parseSimpleRule } from '../src/network.js';
-import { mirrorTokenFromPattern } from '../src/tokens.js';
+import {
+  mirrorTokenFromPattern,
+  mirrorTokenFromQuerypruneValue,
+  mirrorTokenFromRegex,
+} from '../src/tokens.js';
+import {
+  NODE_TYPE_NET_OPTION_NAME_REMOVEPARAM,
+} from '@gorhill/ubo-core/js/static-filtering-parser.js';
 
 const MODIFIER_PROBE_LIMIT = 200;
 
@@ -34,17 +44,12 @@ let selectorInvalid = 0;
 const parser = new AstFilterParser({ interactive: true, trustedSource: false });
 const probed = [];
 const modifierProbes = { removeparam: [], csp: [], permissions: [], uritransform: [] };
-// Dispatch-lane profile: how each network rule reaches a request on the
-// onBeforeRequest path (see src/tokens.js). Mirrors FilterCompiler#makeToken
-// and the pure-hostname dictionary lane; informational, not a gate.
-const tokenProfile = {
-  hostname_dict: 0,
-  token_distinct: 0,
-  token_generic: 0,
-  token_short: 0,
-  tokenless: 0,
-  regex: 0,
-};
+// Rule-level lint for the NO_TOKEN_HASH (always-tested) lane. The authoritative
+// dispatch profile is derived from the engine's own bucket histogram after
+// compilation; this lint only classifies, per rule, whether an always-tested
+// rule is inherent policy (pattern `*`, regex without a derivable token, or any
+// scoped option) or a rewritable defect (bare tokenless pattern like `*xyz*`).
+const ruleLint = { policy: 0, fixable: 0 };
 
 function hostFromHostAnchor(line) {
   const rest = line.slice(2);
@@ -72,6 +77,28 @@ function removeparamProbeQuery(value, token) {
   }
   if (/[~|=]/.test(value)) return null;
   return `?${value}=${token}&keep=1`;
+}
+
+// Mirror of FilterCompiler#isJustOrigin(): true when the rule is an origin
+// dict rule (ANY_TOKEN_HASH / ANY_HTTP_TOKEN_HASH / ANY_HTTPS_TOKEN_HASH lane),
+// i.e. optionUnitBits === FROM_BIT, pattern `*` or a bare `http[s*]:` with a
+// start anchor, and the domain list contains no `~`/`/`.
+function isJustOriginRule(parser, line) {
+  const opts = line.split('$').slice(1).join('$');
+  if (opts === '') return false;
+  const domainValues = [];
+  for (const seg of opts.split(',')) {
+    if (seg === '') continue;
+    const m = /^(?:domain|from)(?:=(.*))?$/.exec(seg);
+    if (m === null) return false;
+    if (m[1] !== undefined) domainValues.push(m[1]);
+  }
+  if (domainValues.length === 0) return false;
+  if (/[/~]/.test(domainValues.join('|'))) return false;
+  const pattern = parser.getNetPattern();
+  if (pattern === '*') return true;
+  if (parser.isLeftAnchored() === false) return false;
+  return /^(?:http[s*]?:(?:\/\/)?)$/.test(pattern);
 }
 
 for (const line of rules) {
@@ -115,17 +142,31 @@ for (const line of rules) {
     }
   }
   if (parser.isNetworkFilter()) {
-    const opts = parser.hasOptions();
-    if (parser.isHostnamePattern() && opts === false) {
-      tokenProfile.hostname_dict += 1;
-    } else if (parser.isRegexPattern()) {
-      tokenProfile.regex += 1;
+    // Always-tested (NO_TOKEN_HASH lane) rule lint.
+    //  - regex patterns: policy when no token can be derived from literals.
+    //  - pattern `*`: policy unless removeparam (value token) or just-origin.
+    //  - plain patterns: policy when scoped (any option), fixable when a bare
+    //    tokenless pattern such as `*xyz*` (rewritable, no cost-free reason).
+    // Hostname-anchored rules are never touched here: they ride the hostname
+    // dict lane unless they carry option-units, which still keep a hostname
+    // token — so they cannot be always-tested.
+    if (parser.isRegexPattern()) {
+      if (mirrorTokenFromRegex(parser.getNetPattern()) === null) {
+        ruleLint.policy += 1;
+      }
+    } else if (parser.isAnyPattern()) {
+      const rp = parser.getNetOptionValue(NODE_TYPE_NET_OPTION_NAME_REMOVEPARAM);
+      if ([...parser.getNodeTypes()].includes(NODE_TYPE_NET_OPTION_NAME_REMOVEPARAM)) {
+        if (mirrorTokenFromQuerypruneValue(rp) === null) ruleLint.policy += 1;
+      } else if (isJustOriginRule(parser, line) === false) {
+        ruleLint.policy += 1;
+      }
     } else {
       const t = mirrorTokenFromPattern(parser.getNetPattern());
-      if (t === null) tokenProfile.tokenless += 1;
-      else if (t.token.length === 1) tokenProfile.token_short += 1;
-      else if (t.badness > 0) tokenProfile.token_generic += 1;
-      else tokenProfile.token_distinct += 1;
+      if (t === null) {
+        if (parser.hasOptions()) ruleLint.policy += 1;
+        else ruleLint.fixable += 1;
+      }
     }
   }
 }
@@ -183,6 +224,29 @@ if (registeredUnits < networkLineCount * 0.98) {
     `engine registered only ${registeredUnits} units for ${networkLineCount} network lines`
   );
   process.exitCode = 1;
+}
+
+// Dispatch-lane profile straight from the engine: every network unit sits in a
+// realm bucket keyed by token hash, and bucketHistogram() enumerates them.
+//  - DOT_TOKEN_HASH + FilterHostnameDict: hostname dictionary (cheap)
+//  - ANY/ANY_HTTPS/ANY_HTTP_TOKEN_HASH + FilterJustOrigin*: origin dict (cheap)
+//  - every other token hash: tokenized pattern (cheap, one bucket per token)
+//  - NO_TOKEN_HASH: always tested on every request (never on a token)
+const engineProfile = { hostname_dict: 0, origin_dict: 0, token_units: 0, token_1char: 0, token_2plus: 0, no_token: 0 };
+{
+  let entries = null;
+  const origInfo = console.info;
+  console.info = (x) => { entries = x; };
+  snfe.bucketHistogram();
+  console.info = origInfo;
+  for (const h of entries ?? []) {
+    if (h.token === '10000000') engineProfile.hostname_dict += h.count;
+    else if (h.token === '20000000' || h.token === '30000000' || h.token === '40000000') engineProfile.origin_dict += h.count;
+    else if (h.token === '50000000') engineProfile.no_token += h.count;
+    else if (h.token.length === 1) engineProfile.token_1char += h.count;
+    else engineProfile.token_2plus += h.count;
+  }
+  engineProfile.token_units = engineProfile.token_1char + engineProfile.token_2plus;
 }
 
 // Liveness probes: every probed simple option-less rule must actually block a
@@ -276,18 +340,29 @@ console.log(
   `output: ${rules.length} rules (${kinds2.network} network, ${kinds2.cosmetic} cosmetic)`
 );
 
-const tp = tokenProfile;
-const tpTotal =
-  tp.hostname_dict + tp.token_distinct + tp.token_generic +
-  tp.token_short + tp.tokenless + tp.regex;
-const tpCheap = tp.hostname_dict + tp.token_distinct;
-const tpExpensive = tpTotal - tpCheap;
+const ep = engineProfile;
+const epTotal =
+  ep.hostname_dict + ep.origin_dict + ep.token_units + ep.no_token;
+const epCheap = epTotal - ep.no_token;
+const epPct = (100 * epCheap) / epTotal;
 console.log(
-  `engine token profile: ${tpTotal} network rules → ` +
-  `${tp.hostname_dict} hostname-dict lane / ${tp.token_distinct} distinctive-token / ` +
-  `${tp.token_generic} generic-token / ${tp.token_short} 1-char-token / ` +
-  `${tp.tokenless} tokenless / ${tp.regex} regex ` +
-  `— ${tpCheap} dispatch-cheap (${((100 * tpCheap) / tpTotal).toFixed(1)}%), ` +
-  `${tpExpensive} expensive-pron (${((100 * tpExpensive) / tpTotal).toFixed(1)}%)`
+  `engine dispatch: ${epTotal} network units → ` +
+  `${ep.hostname_dict} hostname-dict / ${ep.origin_dict} origin-dict / ` +
+  `${ep.token_units} tokenized (${ep.token_2plus} ≥2-char, ${ep.token_1char} 1-char) ` +
+  `— ${epCheap} on token/hash lanes (${epPct.toFixed(3)}%), ` +
+  `${ep.no_token} always-tested (NO_TOKEN_HASH)`
 );
+const lintPolicy = ruleLint.policy;
+const lintFixable = ruleLint.fixable;
+console.log(
+  `rule lint: ${lintPolicy + lintFixable} network rule(s) reach NO_TOKEN_HASH ` +
+  `(mirror: ${lintPolicy} inherent policy, ${lintFixable} rewritable defect)`
+);
+if (lintFixable > 0) {
+  console.error(
+    `rule lint: ${lintFixable} network rule(s) are always-tested yet rewritable ` +
+      `(bare tokenless pattern, no scoping option) — rewrite them so a token can be derived`
+  );
+  process.exitCode = 1;
+}
 console.log(`exit: ${process.exitCode === 1 ? 'FAIL' : 'PASS'}`);
