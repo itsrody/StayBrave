@@ -128,6 +128,9 @@ node src/main.js --help
   - `expand_includes` + `max_include_depth` — resolve uBO `!#include` directives.
   - `cache_dir` — ETag cache directory (committed-free; `.gitignore`d). Each URL
     is cached at `<sha256(url)>.json`; cache hits return 304s and skip re-download.
+    Sources whose CDN bumps a version ETag without changing bytes (e.g.
+    easylist.to) are still treated as cache hits: the body is kept, only the
+    validators are refreshed, so "fetched" only counts genuinely new content.
 - `output` — `file` (default output path, CLI `-o` overrides it), `title`,
   `description`, `expires`, `homepage` (all written into the ABP header).
 - `filter` — optional:

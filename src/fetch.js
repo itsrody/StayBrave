@@ -123,7 +123,13 @@ export class Fetcher {
           if (resp.ok) {
             const body = await resp.text();
             status = 200;
-            this.bytesTransferred += body.length;
+            // Some CDNs bump their ETag/version stamp without changing the
+            // body (e.g. easylist.to touches files on publish). A fresh 200
+            // with byte-identical content is a cache hit: refresh the
+            // validators so the next request can still 304, but don't count
+            // the download or rewrite the body.
+            const unchanged = cached !== undefined && body === cached.body;
+            if (!unchanged) this.bytesTransferred += body.length;
             this.writeCache(url, {
               url,
               etag: resp.headers.get('etag') ?? null,
@@ -131,7 +137,7 @@ export class Fetcher {
               fetchedAt: new Date().toISOString(),
               body,
             });
-            return { text: body, fromCache: false };
+            return { text: body, fromCache: unchanged };
           }
         } finally {
           release();
