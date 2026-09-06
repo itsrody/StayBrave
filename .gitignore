@@ -1,2 +1,3 @@
-/target
-/StayBrave.txt
+# Node
+/node_modules
+/.cache

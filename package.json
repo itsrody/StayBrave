@@ -1,0 +1,26 @@
+{
+  "name": "staybrave-classic",
+  "version": "0.2.0",
+  "description": "Fetch, analyze, and optimize filter lists into a single sorted, de-duplicated list for Firefox uBlock Origin 1.74+ (StayBrave-Classic.txt)",
+  "license": "MPL-2.0",
+  "type": "module",
+  "bin": {
+    "staybrave": "src/main.js"
+  },
+  "exports": {
+    ".": "./src/lib.js"
+  },
+  "scripts": {
+    "start": "node src/main.js",
+    "build": "node src/main.js",
+    "verify": "node examples/verify.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@gorhill/ubo-core": "^0.1.30",
+    "tldts": "^6.1.0"
+  }
+}

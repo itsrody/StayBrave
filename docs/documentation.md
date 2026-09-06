@@ -1,393 +1,363 @@
-# StayBrave
+# StayBrave Classic
 
-**StayBrave** is a Rust command-line tool that fetches, analyzes, validates, and
-optimizes Adblock-Plus-style filter lists (EasyList, EasyPrivacy, uBlock Origin
-filters, AdGuard, etc.) into a single, deduplicated, sorted `StayBrave.txt`
-filter list.
+**StayBrave Classic** is a Node.js pipeline that fetches, analyzes, validates,
+and optimizes Adblock-Plus / uBlock Origin filter lists (EasyList, EasyPrivacy,
+AdGuard, Fanboy, ABP, StevenBlack hosts, …) into a single, deduplicated, sorted
+`output/StayBrave-Classic.txt` for **Firefox uBlock Origin 1.74+**.
 
-Every rule in the output is validated by the **exact same parser** that powers
-Brave's native adblocker — the [`adblock`](https://crates.io/crates/adblock)
-Rust crate (adblock-rust). If a rule survives the pipeline, the Brave engine can
-parse it.
+Every rule in the output is validated by **uBlock Origin's own filter parser**
+(`@gorhill/ubo-core` `AstFilterParser`) and the resulting file is compiled
+through the real `StaticNetFilteringEngine` before anything can be committed. If
+a rule survives the pipeline, uBO can parse and execute it.
+
+The list deliberately excludes the lists uBO ships built-in (uAssets) and drops
+every syntax uBO/Firefox cannot run, so the merged list is pure incremental
+weight on top of uBO's defaults.
 
 ---
 
-## Why Rust?
+## Why Node.js?
 
-- **Accuracy by construction** — the tool links the real `adblock` crate, so
-  rules are parsed with Brave's own `adblock::lists::parse_filter`. There is no
-  hand-rolled parser to drift out of sync with the browser engine.
-- **Throughput** — tokio async I/O downloads lists concurrently; rayon parses
-  the (often ~150k-line) lists in parallel across CPU cores.
-- **Zero runtime dependencies** — ships as a single static binary.
+- **Accuracy by construction** — the tool links `@gorhill/ubo-core`, the engine
+  uBO itself uses (`AstFilterParser` for parsing, `StaticNetFilteringEngine`
+  for network matching). There is no hand-rolled parser to drift out of sync
+  with the browser extension.
+- **uBO semantics, not Brave's** — unlike the previous adblock-rust-based build
+  (Brave's blocker), this pipeline targets Firefox uBO. Rules uBO executes
+  (`$popup`, `$empty`/`$mp4`, host-scoped scriptlets with `trusted-*` support,
+  procedural cosmetics, HTML/responseheader filters) are kept, and rules uBO
+  cannot execute are dropped with per-source causes.
+- **No compilation step** — plain ESM on Node 20+, runnable anywhere.
 
 ---
 
 ## Pipeline
 
 ```
-lists.toml ──▶ Fetch ──▶ Normalize ──▶ Analyze+Filter ──▶ Optimize ──▶ Write
-              (fetcher) (normalizer)  (analyzer/filter) (optimizer)  (writer)
-                 │            │               │              │            │
-              concurrent   hosts→||^,    adblock         dedup +      audit header +
-              HTTP +       $empty/$mp4,  parse_filter    sort         StayBrave.txt
-              !#include    redirect      validation
-              expansion    canonicalization
+lists.json ──▶ Fetch ──▶ Preprocess ──▶ Normalize ──▶ Analyze ──▶ Optimize ──▶ Write
+             (fetch)    (preprocess)  (normalize)  (analyze)  (optimize)   (writer)
+                │             │             │            │          │            │
+             concurrent   !#if/!#else   hosts→||^,  uBO's own   dedup +    ABP header +
+             HTTP + ETag   !#include     redirect   parser      sort +     provenance
+             cache         whitelist     aliases    validation  subsumption stats
 ```
 
 | Stage | Module | Responsibility |
 | --- | --- | --- |
-| Fetch | `src/fetcher.rs` | Concurrent downloads with a semaphore, timeouts, retries + exponential backoff, redirect limits, and recursive `!#include` expansion. |
-| Normalize | `src/normalizer.rs` | Translates cross-family syntax into engine-compatible rules: hosts lines to `||domain^`, uBO `$empty`/`$mp4` shorthands to `$redirect`, and uBO/ABP redirect aliases to canonical resource names. |
-| Analyze | `src/analyzer.rs` | Validates every line with `adblock::lists::parse_filter` (rayon-parallel) and classifies results into named statistics buckets. |
-| Filter | `src/filter.rs` | Drops rules referencing functionality the Brave engine cannot execute (uBO scriptlets, unlisted `$redirect` resources). |
-| Optimize | `src/optimizer.rs` | Removes exact duplicates, sorts deterministically, applies proven network/cosmetic subsumption and the cosmetic cost passes (comma-list split, Pass 2/3 subsumption), and reports channel/token-bucket diagnostics. |
-| Write | `src/writer.rs` | Emits `StayBrave.txt` with a full provenance/statistics header. |
-| Config | `src/config.rs` | Typed deserialization of `lists.toml`. |
+| Fetch | `src/fetch.js` | Concurrent downloads bounded by a semaphore, retries + exponential backoff, timeouts, an ETag/`If-None-Match` disk cache, and recursive `!#include` expansion. |
+| Preprocess | `src/preprocess.js` | Evaluates uBO preparser directives (`!#if` / `!#else` / `!#endif`) against the desktop-Firefox token environment and resolves `!#include`. |
+| Normalize | `src/normalize.js` | Translates cross-family syntax: hosts files to `||domain^`, strips hosting IP comments, drops `localhost` aliases, canonicalizes uBO/ABP redirect resource aliases. uBO-native `$empty`/`$mp4` pass through unchanged. |
+| Analyze | `src/ubo.js` + `src/analyze.js` | Parses every line with uBO's own `AstFilterParser` (`trustedSource:false`, exactly like uBO 1.74+) and classifies results into statistics. Applies the cosmetic preprocessing uBO itself performs (dead-operator detection, procedural rewrite). |
+| Optimize | `src/optimize.js` + `src/network.js` + `src/cosmetic.js` | Removes exact duplicates, sorts deterministically, applies provable network + cosmetic subsumption passes, and reports channel / token-bucket diagnostics. |
+| Write | `src/writer.js` | Emits `output/StayBrave-Classic.txt` with a full provenance/statistics header. |
+| Config | `src/config.js` | Validates `lists.json`, merges defaults. |
 
 ---
 
-## Building
+## Setup
 
-Requires Rust 1.70+ (developed against 1.94).
+Requires **Node.js 20+** (developed against Node 25; CI uses Node 22).
 
 ```sh
-cargo build --release
+npm install
+npm test        # unit tests for the ported modules
+npm run build   # node src/main.js → output/StayBrave-Classic.txt
+npm run verify  # node examples/verify.js — independent gate on the output
 ```
-
-The binary is produced at `target/release/staybrave`.
 
 ## Usage
 
 ```sh
-./target/release/staybrave                     # uses lists.toml, writes output/StayBrave.txt
-./target/release/staybrave --config lists.toml # explicit config path
-./target/release/staybrave -o out.txt          # override output path
-./target/release/staybrave --help
+node src/main.js                          # lists.json → output/StayBrave-Classic.txt
+node src/main.js --config lists.json      # explicit config path
+node src/main.js -o /tmp/out.txt          # override output path
+node src/main.js --offline                # never touch the network; .cache only
+node src/main.js --help
 ```
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `-c, --config` | `lists.toml` | Path to the TOML config describing the lists to fetch. |
-| `-o, --output` | `output/StayBrave.txt` (from config) | Output file path. |
-
-Log level can be tuned with `RUST_LOG` (e.g. `RUST_LOG=debug ./target/release/staybrave`).
+| `-c, --config` | `lists.json` | Path to the JSON config describing the lists to fetch. |
+| `-o, --output` | `output/StayBrave-Classic.txt` (from config) | Output file path. |
+| `--offline` | off | Serve everything from `.cache`; fail on any cache miss. |
 
 ---
 
-## Configuration (`lists.toml`)
+## Configuration (`lists.json`)
 
-```toml
-[fetch]
-concurrency = 16          # max parallel HTTP requests
-timeout_secs = 30         # per-request timeout
-retries = 2               # retries after transient/5xx failures
-retry_delay_ms = 500      # initial backoff (doubles per retry)
-max_redirects = 5
-expand_includes = true    # resolve !#include directives
-max_include_depth = 4     # recursion limit for nested includes
-user_agent = "StayBrave/0.1 (filter-list optimizer)"
-
-[output]
-file = "output/StayBrave.txt"
-
-[filter]                          # optional; defaults match Brave's supported set
-scriptlets = true                 # strip uBO +js()/script:inject rules
-redirect_allowlist = [            # canonical $redirect resource names that are kept
-  "1x1.gif", "noop.js", "empty", "google-ima.js",
-]
-
-[[lists]]
-name = "EasyList"
-url = "https://easylist.to/easylist/easylist.txt"
-enabled = true
-
-[[lists]]
-name = "StevenBlack hosts"
-url = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
-enabled = true
-hosts = true                     # treat as a hosts file, not adblock syntax
+```json
+{
+  "fetch": {
+    "concurrency": 16,
+    "timeout_secs": 30,
+    "retries": 2,
+    "retry_delay_ms": 500,
+    "max_redirects": 5,
+    "expand_includes": true,
+    "max_include_depth": 4,
+    "cache_dir": ".cache"
+  },
+  "output": {
+    "file": "output/StayBrave-Classic.txt",
+    "title": "StayBrave Classic",
+    "expires": "3 days"
+  },
+  "filter": {
+    "scriptlets": true,
+    "keep_trusted_only": false,
+    "network_optimize": true,
+    "cosmetic_cost": {
+      "split_comma_lists": false,
+      "subsume_selectors": true,
+      "subsume_procedural": true
+    }
+  },
+  "lists": [
+    { "name": "EasyList", "url": "https://easylist.to/easylist/easylist.txt", "enabled": true },
+    { "name": "StevenBlack hosts", "url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", "enabled": true, "hosts": true }
+  ]
+}
 ```
 
 ### Fields
 
-- `[fetch]` — all fields optional (documented defaults apply).
-- `[output]` — `file` is the default output path (CLI `-o` overrides it).
-- `[filter]` — all fields optional:
-  - `scriptlets` (default `true`) — drop uBO scriptlet-injection cosmetic rules
-    (`##+js(...)`, `#@#+js(...)`, `##script:inject(...)`). The adblock-rust
-    parser accepts them but Brave cannot execute scriptlets, so they are dead
-    weight.
-  - `redirect_allowlist` (default: the canonical no-op/media/google resource
-    names adblock-rust/Brave ships) — `$redirect`/`$redirect-rule`/`$rewrite`
-    rules referencing any resource not in this list are dropped, since they can
-    never resolve to a real redirect. Values are compared after
-    canonicalization (uBO aliases like `noopjs` → `noop.js`, `abp-resource:`
-    prefixes stripped).
-  - `cosmetic_cost` — all fields optional (default `true` each):
-    - `split_comma_lists` — split pure-CSS `##.a, .b` comma lists into
-      individual rules (fixes the engine's first-token cosmetic keying bug).
-    - `subsume_selectors` — Pass 2: remove cosmetic rules provably covered by a
-      broader-scope same-selector rule or a cheaper bare-token generic rule.
-    - `subsume_procedural` — Pass 3: remove procedural rules covered by a plain
-      rule on the same base selector, and de-duplicate procedural variants
-      across host scopes.
-- `[[lists]]` — an array of sources:
-  - `name` (required) — display name used in logs and the output header.
+- `fetch` — all optional:
+  - `concurrency` bound on parallel HTTP requests.
+  - `timeout_secs`, `retries`, `retry_delay_ms` — transient/5xx retry policy.
+  - `max_redirects` — HTTP redirect limit.
+  - `expand_includes` + `max_include_depth` — resolve uBO `!#include` directives.
+  - `cache_dir` — ETag cache directory (committed-free; `.gitignore`d). Each URL
+    is cached at `<sha256(url)>.json`; cache hits return 304s and skip re-download.
+- `output` — `file` (default output path, CLI `-o` overrides it), `title`,
+  `description`, `expires`, `homepage` (all written into the ABP header).
+- `filter` — optional:
+  - `scriptlets` (default `true`) — drop generic uBO scriptlet rules
+    (`##+js(...)`) and legacy `script:inject`. Host-scoped scriptlets are kept
+    only while `scriptlets` is enabled, and `trusted-*` scriptlets are dropped
+    unless `keep_trusted_only` is `true` (the pipeline parser runs
+    `trustedSource:false`, matching a normal Firefox uBO).
+  - `keep_trusted_only` (default `false`).
+  - `network_optimize` (default `true`) — run the network / scoped subsumption
+    passes.
+  - `cosmetic_cost` — independent toggles for the cosmetic passes
+    (`split_comma_lists` default off — pure-CSS comma lists are canonicalized
+    to grouped form instead of split; `subsume_selectors`, `subsume_procedural`
+    default on).
+- `lists` (required) — array of sources:
+  - `name` (required) — display name used in logs and the header.
   - `url` (required) — http(s) URL of the raw filter list.
-  - `enabled` (optional, default `true`) — set `false` to keep a list in the
-    config without fetching it.
-  - `hosts` (optional, default `false`) — when `true`, the list is treated as
-    hosts-file syntax: `#`/`!` comments are dropped, and IP-led or bare-domain
-    lines become `||domain^` network rules. Required for lists such as
-    StevenBlack/hosts, whose comments would otherwise be misparsed as bogus
-    literal-substring filters.
+  - `enabled` (optional, default `true`) — keep a list in the config without
+    fetching it.
+  - `hosts` (optional, default `false`) — treat the list as hosts-file syntax:
+    `#`/`!` comments dropped, IP-led or bare-domain lines become `||domain^`
+    rules. Required for StevenBlack/hosts.
 
 ---
 
 ## How it works
 
-### 1. Fetch (`src/fetcher.rs`)
+### 1. Fetch (`src/fetch.js`)
 
-- Only `enabled` lists are fetched.
-- A `Semaphore` bounds concurrency to `fetch.concurrency`.
-- Failed/5xx responses retry up to `fetch.retries` times with exponential
-  backoff; other HTTP statuses fail immediately.
-- Responses are decoded lossily to UTF-8 (filter lists occasionally contain
-  stray bytes).
+- Only `enabled` lists are fetched, concurrently up to `fetch.concurrency`.
+- A permanent **ETag cache** lives in `fetch.cache_dir` (`.cache/`): each fetch
+  re-sends `If-None-Match` / `If-Modified-Since`; a 304 reuses the cached body.
+  This makes rebuilds near-instant and `--offline` reproducible.
+- Failed/5xx responses retry with exponential backoff; other statuses fail.
+- Responses are decoded lossily to UTF-8.
+- `!#include` directives are resolved (relative against the including file's
+  URL, http(s) only) with cycle detection and `max_include_depth`; a failed
+  include becomes a `! StayBrave: …` comment so nothing is silently lost.
 
-**`!#include` expansion** — uBlock Origin and AdGuard lists assemble large
-lists from `!#include <file>` directives. The fetcher:
+### 2. Preprocess (`src/preprocess.js`)
 
-- Resolves **relative** include URLs against the including file's URL
-  (e.g. `!#include filters-2023.txt` inside
-  `https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/filters.txt`
-  resolves to `.../filters/filters-2023.txt`).
-- Detects include **cycles** and enforces `max_include_depth`.
-- Unresolvable or failed includes are replaced by a `! StayBrave: ...` comment
-  (and logged), so nothing is silently lost.
+uBO lists use preparser directives. The pipeline runs the same token logic as
+uBO's `preparser.js` with a whitelist centered on the desktop-Firefox uBO
+target: `ublock`, `firefox`, `html_filtering`, `user_stylesheet` are `true`;
+AdGuard tokens such as `adguard_ext_firefox` map to `firefox`; everything else
+(Chrome/Safari/Android/MV3/trusted/AdGuard-specific) evaluates `false`. Branch
+bodies are expanded and their lines included; excluded branches are dropped,
+so platform-specific additions never leak into the merged list.
 
-### 2. Normalize (`src/normalizer.rs`)
+### 3. Normalize (`src/normalize.js`)
 
-Before parsing, every line passes through a small translator that maps
-cross-family syntax to rules the engine understands. Every translated line is
-then re-parsed by the real engine, so a rewrite can never silently change
-semantics — if the rewritten text does not parse, it is simply dropped.
+- **Hosts files**: drop comments, skip `localhost`/`ip6-*`/`broadcasthost`
+  aliases and invalid hosts, emit `||domain^` for every other bare domain.
+- **Redirect alias canonicalization**: `$redirect` / `$redirect-rule` /
+  `$rewrite` resource values are mapped to canonical uBO names
+  (`noopjs` → `noop.js`, `noopmp4-1s` → `noop-1s.mp4`, `abp-resource:`-prefixed
+  aliases stripped), matching the token set uBO 1.74+ ships.
+- **uBO-native shorthands pass through**: `$empty` / `$mp4` / `$mp3` — the
+  shorthand → `$redirect=` expansion is *already* internal to uBO >= 1.63, so
+  rules are kept verbatim (`$mp3` only where uBO validates it).
+- Every translated line is still re-parsed by the real parser in Analyze, so a
+  rewrite can never silently change semantics — if it no longer parses, it is
+  dropped.
 
-- **Hosts files** (lists with `hosts = true`): `#`/`!` comments are dropped and
-  IP-led lines (`0.0.0.0 example.com evil.com`) expand to `||example.com^`,
-  `||evil.com^`. Localhost aliases (`localhost`, `ip6-*`, `broadcasthost`) are
-  skipped. This is required because the parser would otherwise misread
-  `0.0.0.0 example.com` as a literal-substring network filter.
-- **uBO shorthands**: `$empty` → `$redirect=empty`, `$mp4` →
-  `$redirect=noop-1s.mp4`.
-- **Redirect alias canonicalization**: `$redirect`/`$redirect-rule`/`$rewrite`
-  resource values are mapped to canonical names — `noopjs` → `noop.js`,
-  `noopmp4-1s` → `noop-1s.mp4`, `abp-resource:blank-mp4` → `noop-1s.mp4`,
-  etc. — so the allowlist only ever needs canonical names.
-- Everything else passes through unchanged.
+### 4. Analyze (`src/ubo.js`, `src/analyze.js`)
 
-### 3. Analyze + Filter (`src/analyzer.rs`, `src/filter.rs`)
+Each line is parsed with **uBO's own `AstFilterParser`** run exactly as uBO
+1.74+ does for a normal (non-advanced/trusted) installation. Results are
+classified and counted:
 
-Each non-empty line is passed to `adblock::lists::parse_filter` — the same code
-Brave's engine uses — and classified:
-
-| Result | Meaning | Output |
+| Bucket | Meaning | Action |
 | --- | --- | --- |
-| `ParsedLine::Network` | Valid network rule | kept (unless filter drops it) |
-| `ParsedLine::Cosmetic` | Valid cosmetic rule | kept (unless filter drops it) |
-| `Err(Empty)` | Blank/whitespace-only line | skipped |
-| `Err(Unsupported)` | Comment, list header, `$$` AdGuard cosmetics, etc. | skipped |
-| other `Err(...)` | Rule the engine cannot parse | skipped |
+| `network` | Valid static network filter | kept → `src/network.js` |
+| `cosmetic` (`##`, `#?#`, `#@#`) | Valid cosmetic filter | kept → cosmetic pipeline |
+| `scriptlet` (`##+js`, `#@#+js`) | Scriptlet injection | kept only if host-scoped and `scriptlets` enabled; generic dropped |
+| `html` (`##^`) | HTML filtering | kept (uBO 1.74 handles it) |
+| `responseheader` (`^responseheader`) | Response-header modifier | kept |
+| `unsupported` | Comment/header/`$$` AdGuard cosmetics | skipped (counted) |
+| `unsupported_options` | Parseable but carries a modifier uBO rejected (`$urlskip`, `$replace`, `$dnsrewrite`, `$web_accessible_resource`, … — all the `trustedSource`/option-validation drops) | dropped (counted) |
+| `invalid` | Parser error (`astError != 0`) | dropped (counted) |
 
-Only rules that parse successfully are written — **the output is guaranteed to
-be parseable by the adblock-rust engine.**
+Because ABP ships `#$#`/`#%#` *snippet* syntax that uBO parses as style
+injection with a bogus selector, every ABP anti-circumvention snippet line
+lands in `invalid` and is dropped — uBO could not execute it anyway.
 
-Rules that parse but are **unsupported at runtime** are then dropped by the
-filter layer:
+The cosmetic pass also runs the transformations uBO itself applies
+(`src/cosmetic.js`): procedural canonicalization (`:contains(`→`:has-text(`,
+`:-abp-contains(`→`:has-text(`, `:nth-ancestor(`→`:upward(`), dead-operator
+detection (`:others(`, `:-abp-properties(` are no-ops in uBO → dropped),
+`splitCosmetic` guard so `#?#`/`##^`/`^responseheader` are routed correctly,
+and cosmetic stats (`plainBase`, channels, `LocToken`).
 
-- **uBO scriptlet injection** — cosmetic rules carrying the engine's
-  `SCRIPT_INJECT` flag (`##+js(...)`, `#@#+js(...)`) or the legacy
-  `script:inject(...)` selector. The engine parses these as cosmetic filters
-  but has no scriptlet runtime to execute them, so they would never run in a
-  browser.
-- **Unlisted `$redirect` / `$redirect-rule` / `$rewrite` resources** — any
-  redirect rule whose (canonicalized) resource name is absent from
-  `filter.redirect_allowlist` (default: the canonical no-op/media/google
-  resource names adblock-rust/Brave ships). Without a matching resource the
-  rule can never redirect, so it is removed.
+### 5. Optimize (`src/optimize.js`, `src/network.js`, `src/cosmetic.js`)
 
-Filtered counts are reported per source in the output header, together with
-three more named buckets: hosts entries converted, and network options /
-cosmetic syntax the engine does not recognize (AdGuard `$cookie`, `$stealth`,
-`$sitekey`, `$csp`, `#$#`/`#%#` inline scriptlets, `$$` response filters, ...).
+After exact-string dedup and deterministic sort:
 
-### 4. Optimize (`src/optimizer.rs`)
-
-After deduplication and a deterministic byte-wise sort:
-
-- **Network subsumption** (`src/network.rs`) — option-less block rules
-  (`||host^`, `||host/path^`) are parsed into host/path parts and sorted by
-  length so broader rules are always decided first. A rule is dropped when a
-  kept rule covers it: same-host `host/`, `/path/`-boundary prefixes, or a
-  parent path covering a child path. `$`-option rules, exceptions (`@@`),
-  regex/`*` patterns, and `$domain`-restricted rules are opaque and untouched.
-- **Bare-host caret preservation** — `||host^` and `||host/` subsume
-  identically for sub-resources, but they are *different rules*: in adblock-rust
-  a hostname-anchored, right-anchored rule with no content-type options is
-  given an implicit `FROM_ALL_TYPES` mask, so `||host^` also blocks top-level
-  Document navigations while `||host/` does not. When the two coincide, the
-  `^` form is kept as the survivor. No `||host^` → `||host/` conversion is ever
-  performed: the `^` is not a regex (it is compiled to the right-anchor flag),
-  and rewriting would silently drop navigation blocking.
-- **Cosmetic subsumption** (`src/cosmetic.rs`) — among host-scoped plain-CSS
+- **Network subsumption** — option-less block rules (`||host^`, `||host/path^`)
+  are parsed into host/path (`parseSimpleRule`) and the set is greedily
+  rechecked broadest-first. A rule is dropped when a kept rule covers it:
+  same-host with a `/` terminator, one path a `/`-boundary prefix of another,
+  or the exact host with `^`. `$`-option rules, exceptions (`@@`), regex/`*`
+  patterns, wildcard hosts (`*.example.com`), uppercase hosts, and
+  `$domain`-restricted rules are opaque. `$badfilter` pairs are stripped first
+  (`stripBadfilterPairs`), and wildcard-TLD `$domain=….*` rules are preserved
+  but counted (`countWildcardDomainRules`).
+- **Scoped subsumption** — an option-less rule dominates the same rule carrying
+  any subset of the *subsumable* option set (`script, image, stylesheet,
+  object, object-subrequest, media, subdocument, ping, xmlhttprequest, xhr,
+  websocket, font, other, http, https, third-party, first-party`). uBO's
+  engine was verified via `StaticNetFilteringEngine.matchRequest`: an
+  option-less rule **never** matches a `popup` request type, so `$popup` (and
+  `document`, `important`, `redirect*`, `domain`, `badfilter`) are excluded —
+  a `$popup` rule is never collapsed into an option-less variant and is
+  preserved as-is.
+- **Cosmetic subsumption** (`src/cosmetic.js`) — among host-scoped pure-CSS
   rules with an identical selector and kind, a narrower host scope is dropped
-  when a broader one covers it (subdomain families share the engine's
-  hostname-probe channel). Entity locations (`example.*`) participate as
-  *covers*: the engine's entity probe set (label suffixes of the registrable
-  domain plus the bare public suffix) is broader than any full hostname, so
-  `example.*##.ad` covers `example.com##.ad`, `www.example.co.uk##.ad`, etc.
-  A full hostname never covers an entity. Negated locations (`~x`, `~x.*`) and
-  procedural selectors stay opaque.
-- **Cosmetic cost passes** (`src/cosmetic.rs`, gated by `[filter.cosmetic_cost]`
-  in `lists.toml`, all default-on). These only remove rules that are provably
-  covered by another (surviving) rule:
-  - `split_comma_lists` — pure-CSS `##.a, .b, .c` comma lists are split into
-    individual rules. The engine keys cosmetic rules on the first class/id
-    token only (`cosmetic_filter_utils.rs`), so an unsplit list is delivered in
-    full only when `.a` is present; splitting fixes that routing bug and
-    improves match precision.
-  - `subsume_selectors` (Pass 2) — two provable cover rules, iterated to a
-    fixpoint so a rule is removed only when its cover also survives: (A) an
-    identical selector on a strictly-broader scope covers (same channel kind);
-    (B) a bare class/id selector covers a costlier descendant selector in the
-    *generic* channel (e.g. `##.ad` removes `##div.ad`, `.ad .x`, `[data-ad]`
-    attribute targets) — the generic engine only materializes rules for
-    present classes, so the two are label-identity-equal. Ancestor compounds
-    behind sibling combinators (`.ad + .x`) are never considered covers, and
-    `$generichide`/host-scoped rules are opaque to generic covers in both
-    directions.
-  - `subsume_procedural` (Pass 3) — generic `:has-text`/`:matches-css` etc.
-    never survive parsing in adblock-rust (`filters/cosmetic.rs` rejects
-    `GenericAction`), so every procedural rule is host-scoped. Pass 3 removes
-    a procedural rule when (i) the same `plain_base` selector exists as a
-    non-procedural hide with a scope that covers it (`##.ad` removes
-    `example.com##.ad:has-text(x)`), or (ii) an identical procedural selector
-    exists on a strictly-broader scope. Procedural exceptions (`#@#…:has-text`)
-    never participate, and exception pruning applies only to exactly-equal
-    selector strings.
-- **Tokenizer diagnostics** — the optimizer reports how final network rules
-  distribute across the engine's token buckets: hostname-tokened rules (cheap
-  prefilter) vs. catch-all bucket-0 rules that are checked on *every*
-  request, plus a count of AdGuard wildcard-TLD `$domain=….*` rules (kept in
-  the output — dropping one would broaden blocking — but noted because the
-  engine hashes such values verbatim and they never actually match). Final
-  cosmetic rules are also binned into the engine's delivery channels
-  (simple class/id, complex token-led, generic-misc, hostname-hide,
-  hostname-unhide, procedural) so heavy rules are visible.
+  when a broader one covers it (subdomain families share uBO's hostname-probe
+  channel order). Entity locations (`example.*`) participate as covers via the
+  registrable-domain suffix set (`tldts`); a full hostname never covers an
+  entity. Negated locations (`~x`, `~x.*`) and procedural selectors stay
+  opaque, and generic rules never cover host-scoped ones (uBO `$generichide`).
+- **Cosmetic cost passes** — `subsume_selectors` removes rules provably covered
+  by a broader-scope same-selector rule or (generic channel only) a cheaper
+  bare-token rule `##.ad` covering `##div.ad`, iterated to a fixpoint;
+  `subsume_procedural` removes a procedural rule covered by a plain rule on the
+  same `plainBase` selector or an identical procedural selector on a strictly
+  broader scope.
+- **Diagnostics** — `channelCounts` bins cosmetic rules into uBO's delivery
+  channels (simple class/id, complex token-led, generic-misc, hostname-hide,
+  hostname-unhide, procedural); `tokenBucketEstimate` estimates uBO's network
+  token-bucket split (hostname-tokened vs. catch-all bucket-0 rules).
 
-### 5. Write (`src/writer.rs`)
+### 6. Write (`src/writer.js`)
 
-The output file starts with the ABP-standard `[Adblock Plus 2.0]` marker and a
-metadata header (`! Title`, `! Version`, `! Description`, `! Expires`,
-`! Homepage`, `! Last modified`) so adblock managers can display the list and
-schedule updates, followed by a `!`-comment provenance/statistics header with:
+Output starts with `[Adblock Plus 2.0]` and the ABP metadata header (`! Title`,
+`! Version: YYYYMMDDHHMM`, `! Description`, `! Expires: 3 days`, `! Homepage`,
+`! Last modified`), followed by:
 
-- Generation timestamp (UTC).
-- Per-source audit line: bytes fetched, included files expanded, line counts,
-  network/cosmetic rules, unsupported, invalid, hosts-converted, scriptlet and
-  redirect counts, and unrecognized-option/unsupported-cosmetic counts.
-- Global totals: input rules, unique output rules, duplicates removed, cosmetic
-  rules subsumed (Pass 2), procedural rules subsumed (Pass 3), network rules
-  subsumed, rewritten, semantic duplicates merged, wildcard-TLD `$domain`
-  rules, the estimated token-bucket split (hostname-tokened vs. catch-all
-  network rules), and the cosmetic channel distribution (simple class/id,
-  complex token-led, generic-misc, hostname-hide, hostname-unhide,
-  procedural), plus validated network/cosmetic counts and filtered scriptlet +
-  redirect counts.
+- Per-source provenance: bytes, `! included files`, line counts, kept
+  network/cosmetic/html/scriptlet/responseheader rules, invalid / unsupported /
+  unsupported-options counts, hosts converted, and whether it came from cache.
+- Global totals: input rules, unique rules, duplicates removed, network / scoped
+  / cosmetic / procedural subsumed, redirect rewrites, cosmetic transforms,
+  wildcard-TLD `$domain` rules, the token-bucket split, and the cosmetic
+  channel distribution.
 
-The `Title`, `Description`, `Expires`, and `Homepage` values come from the
-`[output]` section of `lists.toml`; `Version` is the generation timestamp
-(EasyList-style `YYYYMMDDHHMM`), so every build is monotonic.
+`Version` is the generation timestamp (UTC, EasyList-style), so every build is
+monotonic and uBO only re-downloads on change.
 
 ---
 
-## Output format
+## Output format (`output/StayBrave-Classic.txt`)
 
-`StayBrave.txt` is a standard filter list:
-
-- Lines beginning with `!` are comments/header (ignored by the engine).
+- Lines beginning with `!` are comment/header lines (ignored by uBO).
 - Every non-comment line is a validated, deduplicated, sorted filter rule.
-- Blank lines are not emitted.
+- No `#`/`$` shorthand is left uncanonicalized; `$empty`/`$mp4` appear
+  verbatim because uBO ≥ 1.63 expands them internally (verified with the real
+  parser). `$popup` rules are preserved. Host-scoped scriptlets are preserved.
+- Batch behavior is verified independently — see below.
 
 ### Known behavior / limitations
 
-- **Rules using engine-unknown options are dropped.** adblock-rust rejects
-  options such as `$popup`, `$sitekey`, `$cookie`, `$stealth`, `$csp`,
-  `$inline-script`, and `$strict1p` (`UnrecognisedOption`); such rules are
-  eliminated and counted as unsupported options. Dropping them keeps the list
-  honest to what the engine can enforce.
+- **Rules uBO rejects are dropped.** Anything that fails
+  `AstFilterParser` with `trustedSource:false`, carries a `trustedSource`-only
+  option, or is dead in uBO 1.74 (`:others(`, `:-abp-properties(`, ABP
+  `#$#`/`#%#` snippets) is never written and counted per source.
+- **Generic scriptlets are dropped**; host-scoped scriptlets survive. This
+  matches uBO's own limit that generic scriptlet injection is meaningless
+  without a hostscope and that `trusted-*` scriptlets need the advanced
+  mode.
 - **Cosmetic section separators are not written.** Adblock-style `[Section]`
-  headers would be parsed as network filters, so sections are intentionally
-  omitted; the list is one flat sorted set.
-- **uBO scriptlet injection rules are dropped.** `##+js(...)`,
-  `#@#+js(...)`, and `##script:inject(...)` rules are parsed as cosmetic
-  filters but cannot be executed by the engine, so they are filtered out (see
-  `[filter]`).
-- **Deduplication is exact-text**, not semantic. The engine's `Engine`
-  internally normalizes equivalent rules at load time; a `.txt` list cannot do
-  better.
-- **Wildcard-TLD `$domain=….*` rules never match.** adblock-rust 0.13 hashes
-  `$domain` values verbatim and has no wildcard-TLD support for *network*
-  filters (the `entity.*` wildcard exists only for cosmetic locations). Such
-  rules are kept (dropping one would broaden blocking) and counted in the
-  header, but they are inert.
-- **`||host^` is preferred over `||host/`** for the same bare host — the `^`
-  form additionally blocks top-level document navigations (see Optimize above).
+  headers would be parsed as network filters, so sections are omitted; the
+  list is one flat sorted set.
+- **Deduplication is exact-text**, not semantic — uBO normalizes equivalent
+  rules internally at load time.
+- **Wildcard-TLD `$domain=….*` rules are kept and counted**, never dropped
+  (dropping one would broaden blocking), but mirror how uBO's parser treats
+  them (kept, hashed verbatim).
+- **Case-insensitive subsumption, original case preserved** — network
+  subsumption compares paths/hosts case-insensitively (matching the engine's
+  lowercasing) while the survivor keeps its original text. Sources are
+  lowercase in practice.
+- **Never broadens**: every subsumption removes a rule *covered by* a retained
+  rule. Probes in Verify catch any mis-dropped rule.
 
 ---
 
-## Verification (`examples/`)
+## Verification (`examples/verify.js`)
 
-Two runnable harnesses rebuild Brave's engine from artifacts and prove the
-pipeline does not change blocking behavior:
+An independent gate, run on the *output file* before it can be committed:
 
 ```sh
-# Requests the optimizer claims are redundant, probed across a request-type
-# matrix (other/script/image/stylesheet/xhr/media/font/object/ping/websocket/
-# sub_frame/document). Also gates every bare `||host^` rule: it must block a
-# top-level document navigation to its host.
-cargo run --release --example verify -- output/StayBrave.txt
-
-# Before/after engine equivalence over cosmetic hosts, generic class/id
-# selectors, and the network request-type matrix for every rewritten,
-# subsumed, or sampled rule. Fails on any blocking/exception/redirect mismatch.
-cargo run --release --example equivalence -- output/StayBrave.txt
+node examples/verify.js [output] [probeLimit]
 ```
 
-`VERIFY_SAMPLE`, `VERIFY_BASELINE_RULES`, `EQ_MAX_HOSTS`, and `EQ_MAX_NET_URLS`
-tune the sampling sizes.
+1. **Parser gate** — every rule is reparsed with `AstFilterParser`
+   (`trustedSource:false`); any `astError != 0` fails the gate.
+2. **Engine gate** — the whole file is compiled through the real
+   `StaticNetFilteringEngine` (`useLists`); any dropped line (surfaced via the
+   `events` callback) fails the gate.
+3. **Liveness probes** — up to `probeLimit` (default 2000) simple option-less
+   `||host^` / `||host/path^` rules are probed with synthetic script requests
+   through `matchRequest`; a rule that fails to block (result `& 1` == 0) means
+   the optimizer mis-dropped or over-staticized it and fails the gate.
+
+Output ends with `exit: PASS` / `exit: FAIL`. `npm run verify` uses the
+defaults; the GitHub workflow runs it with the concrete output path.
 
 ---
 
 ## Extending
 
-- **Binary `.dat` output** — the "fully optimized" format Brave actually loads.
-  Build an engine and serialize it:
+- **Add a source** — append a `lists` entry to `lists.json`. Anything that
+  parses cleanly flows through; anything uBO rejects is counted and dropped.
+- **Cache control** — delete `.cache/` to force a full re-download; use
+  `--offline` to assert reproducibility from cache alone.
+- **On-demand local builds** — `npm run build` then load
+  `output/StayBrave-Classic.txt` in uBO (Customize → My filters, or the
+  "Import and apply from file" option).
+- **Trusted/advanced mode output** — toggle `filter.keep_trusted_only` to
+  retain `trusted-*` scriptlets (and parse with `trustedSource:true`).
 
-  ```rust
-  let mut fs = adblock::lists::FilterSet::new(false);
-  fs.add_filter_list(text, ParseOptions::default());
-  let engine = adblock::engine::Engine::new_with_filter_set(fs);
-  let dat = engine.serialize();
-  ```
-
-- **Regional lists** — append `[[lists]]` entries for your region.
-- **List tags / categories** — `lists.toml` previously exposed a `tags` array;
-  re-introduce it to support selective fetches by category.
+Browser target is Firefox uBO 1.74+; a Chromium variant would swap the
+preprocessor environment tokens and re-run Verify's request-type matrix.
 
 ---
 
 ## License
 
-MPL-2.0
+MPL-2.0 (this tool and the generated list). The `@gorhill/ubo-core` dependency
+used for validation is GPL-3.0 and is only an orchestration-time dependency —
+it is not shipped, bundled, or linked into the generated list.

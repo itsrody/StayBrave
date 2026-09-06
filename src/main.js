@@ -1,0 +1,97 @@
+#!/usr/bin/env node
+
+import { resolve } from 'node:path';
+import configFromCli from './config.js';
+import { runPipeline } from './lib.js';
+
+function usage() {
+  console.error(
+    [
+      'Usage: staybrave [--config <path>] [--output <path>] [--offline]',
+      '',
+      'Fetch, analyze, and optimize uBlock Origin filter lists into a single',
+      'sorted StayBrave-Classic.txt validated by uBO\'s own filter parser.',
+      '',
+      'Options:',
+      '  -c, --config <path>   config file (default: lists.json)',
+      '  -o, --output <path>   output file (default: output/StayBrave-Classic.txt)',
+      '  --offline             never touch the network; use .cache only',
+    ].join('\n')
+  );
+}
+
+function parseArgs(argv) {
+  const cli = { config: 'lists.json', output: null, offline: false, resolve: false };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    switch (arg) {
+      case '-c':
+      case '--config':
+        cli.config = argv[++i];
+        cli.resolve = true;
+        break;
+      case '-o':
+      case '--output':
+        cli.output = resolve(process.cwd(), argv[++i]);
+        break;
+      case '--offline':
+        cli.offline = true;
+        break;
+      case '-h':
+      case '--help':
+        usage();
+        process.exit(0);
+        break;
+      case '-v':
+      case '--version':
+        console.log('staybrave 0.2.0');
+        process.exit(0);
+        break;
+      default:
+        console.error(`unknown argument: ${arg}`);
+        usage();
+        process.exit(2);
+    }
+  }
+  return cli;
+}
+
+const cli = parseArgs(process.argv.slice(2));
+
+try {
+  const config = configFromCli(cli);
+  const enabled = config.lists.filter((l) => l.enabled).length;
+  const result = await runPipeline(config, {
+    offline: cli.offline,
+    outputPath: cli.output,
+  });
+
+  const fmt = (n) => `${n}`;
+  for (const s of result.summaries) {
+    if (s.ok) {
+      console.log(
+        `[ok]   ${s.name}: ${s.bytes} bytes (+${s.included_files} incl), ${s.total_lines} lines -> ${s.network_rules} network + ${s.cosmetic_rules} cosmetic`
+      );
+    } else {
+      console.error(`[fail] ${s.name}: ${s.error}`);
+    }
+  }
+  const o = result.optimized;
+  console.log('');
+  console.log(
+    `input ${fmt(o.input_rules)} rules -> unique ${fmt(o.unique_rules)} -> final ${fmt(o.rules.length)}`
+  );
+  console.log(
+    `network subsumed: ${fmt(o.network_subsumed)} | scoped subsumed: ${fmt(o.scoped_subsumed)} | cosmetic subsumed: ${fmt(o.cosmetic_selectors_subsumed)} | procedural subsumed: ${fmt(o.procedural_subsumed)}`
+  );
+  console.log(
+    `sources: ${result.sourcesOk} ok / ${result.sourcesFailed} failed (${enabled} enabled, ${config.lists.length} configured)`
+  );
+  console.log(
+    `concatenated ~${(result.bytesTransferred / 1048576).toFixed(1)} MB fetched, ${result.fetchedFromCache} from cache`
+  );
+  console.log(`wrote ${result.outputPath}`);
+} catch (err) {
+  console.error(`staybrave: ${err.message}`);
+  process.exit(1);
+}
