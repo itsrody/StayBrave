@@ -7,6 +7,7 @@ test('token truth table matches desktop Firefox uBO', () => {
   assert.equal(tokenTruth('env_firefox').truth, true);
   assert.equal(tokenTruth('cap_html_filtering').truth, true);
   assert.equal(tokenTruth('cap_user_stylesheet').truth, true);
+  assert.equal(tokenTruth('cap_ipaddress').truth, true);
   assert.equal(tokenTruth('env_chromium').truth, false);
   assert.equal(tokenTruth('env_mobile').truth, false);
   assert.equal(tokenTruth('env_mv3').truth, false);

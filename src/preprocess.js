@@ -40,11 +40,16 @@ const TOKEN_VALUES = {
 };
 
 // Environment value set of a desktop Firefox uBO 1.74+ install.
+// `firefox` + `user_stylesheet` + `html_filtering` are Firefox-specific;
+// `ipaddress` is set unconditionally by uBO's vapi-common flavor soup
+// (cap_ipaddress -> ipaddress in the parser token map), so `!#if cap_ipaddress`
+// branches stay live for the Firefox target.
 export const FIREFOX_ENV = new Set([
   'ublock',
   'firefox',
   'html_filtering',
   'user_stylesheet',
+  'ipaddress',
 ]);
 
 export function tokenTruth(exprToken, env = FIREFOX_ENV) {
