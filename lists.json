@@ -28,27 +28,23 @@
     }
   },
   "provided_lists": [
-    { "name": "uBO - Ads", "url": "https://ublockorigin.github.io/uAssets/filters/filters.txt", "enabled": true },
-    { "name": "uBO - Badware risks", "url": "https://ublockorigin.github.io/uAssets/filters/badware.txt", "enabled": true },
-    { "name": "uBO - Privacy", "url": "https://ublockorigin.github.io/uAssets/filters/privacy.txt", "enabled": true },
-    { "name": "uBO - Quick fixes", "url": "https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt", "enabled": true },
-    { "name": "uBO - Unbreak", "url": "https://ublockorigin.github.io/uAssets/filters/unbreak.txt", "enabled": true },
-    { "name": "uBO - Annoyances", "url": "https://ublockorigin.github.io/uAssets/filters/annoyances.txt", "enabled": true }
+    { "name": "uBO - Ads", "url": "https://cdn.jsdelivr.net/gh/uBlockOrigin/uAssetsCDN@main/filters/filters.min.txt", "enabled": true },
+    { "name": "uBO - Badware risks", "url": "https://cdn.jsdelivr.net/gh/uBlockOrigin/uAssetsCDN@main/filters/badware.min.txt", "enabled": true },
+    { "name": "uBO - Privacy", "url": "https://ublockorigin.pages.dev/filters/privacy.min.txt", "enabled": true },
+    { "name": "uBO - Quick fixes", "url": "https://ublockorigin.github.io/uAssetsCDN/filters/quick-fixes.min.txt", "enabled": true },
+    { "name": "uBO - Unbreak", "url": "https://cdn.jsdelivr.net/gh/uBlockOrigin/uAssetsCDN@main/filters/unbreak.min.txt", "enabled": true },
+    { "name": "uBO - Annoyances", "url": "https://cdn.jsdelivr.net/gh/uBlockOrigin/uAssetsCDN@main/filters/annoyances.min.txt", "enabled": true }
   ],
   "lists": [
-    { "name": "EasyList", "url": "https://easylist.to/easylist/easylist.txt", "enabled": true },
-    { "name": "EasyPrivacy", "url": "https://easylist.to/easylist/easyprivacy.txt", "enabled": true },
+    { "name": "EasyPrivacy", "url": "https://filters.adtidy.org/extension/ublock/filters/118_optimized.txt", "enabled": true },
     { "name": "Peter Lowe", "url": "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblockplus&showintro=1&mimetype=plaintext", "enabled": true },
-    { "name": "AdGuard Base", "url": "https://filters.adtidy.org/extension/ublock/filters/2.txt", "enabled": true },
-    { "name": "AdGuard Tracking Protection", "url": "https://filters.adtidy.org/extension/ublock/filters/3.txt", "enabled": true },
-    { "name": "AdGuard Social Media", "url": "https://filters.adtidy.org/extension/ublock/filters/4.txt", "enabled": true },
-    { "name": "AdGuard Mobile Ads", "url": "https://filters.adtidy.org/extension/ublock/filters/11.txt", "enabled": true },
-    { "name": "AdGuard Annoyances", "url": "https://filters.adtidy.org/extension/ublock/filters/14.txt", "enabled": true },
-    { "name": "AdGuard URL Tracking", "url": "https://filters.adtidy.org/extension/ublock/filters/17.txt", "enabled": true },
+    { "name": "AdGuard Base", "url": "https://filters.adtidy.org/extension/ublock/filters/2_optimized.txt", "enabled": true },
+    { "name": "AdGuard Tracking Protection", "url": "https://filters.adtidy.org/extension/ublock/filters/3_optimized.txt", "enabled": true },
+    { "name": "AdGuard Social Media", "url": "https://filters.adtidy.org/extension/ublock/filters/4_optimized.txt", "enabled": true },
+    { "name": "AdGuard Annoyances", "url": "https://filters.adtidy.org/extension/ublock/filters/14_optimized.txt", "enabled": true },
+    { "name": "AdGuard URL Tracking", "url": "https://filters.adtidy.org/extension/ublock/filters/17_optimized.txt", "enabled": true },
     { "name": "ABP Anti-circumvention", "url": "https://easylist-downloads.adblockplus.org/abp-filters-anti-cv.txt", "enabled": true },
-    { "name": "Fanboy's Social", "url": "https://easylist.to/easylist/fanboy-social.txt", "enabled": true },
-    { "name": "Fanboy's Annoyances", "url": "https://secure.fanboy.co.nz/fanboy-annoyance.txt", "enabled": true },
-    { "name": "Fanboy's Cookiemonster", "url": "https://secure.fanboy.co.nz/fanboy-cookiemonster.txt", "enabled": true },
+    { "name": "Fanboy's Annoyances", "url": "https://filters.adtidy.org/extension/ublock/filters/122_optimized.txt", "enabled": true },
     { "name": "StevenBlack hosts", "url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", "enabled": true, "hosts": true }
   ]
 }
