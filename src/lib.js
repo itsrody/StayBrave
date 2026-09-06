@@ -5,6 +5,7 @@ import { Fetcher } from './fetch.js';
 import { analyzeText, emptyStats } from './analyze.js';
 import { makeParser, TRUSTED_SCRIPTLET_TOKENS } from './ubo.js';
 import { optimize } from './optimize.js';
+import { verifyRemovedCoverage } from './engine.js';
 import { subtractProvided } from './provided.js';
 import { writeOutput } from './writer.js';
 
@@ -64,6 +65,24 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
 
   const optimized = optimize(allRules, config.filter);
 
+  // Engine-certify the optimizer: prove the rules our subsumption passes
+  // removed are still blocked by the survivors, through uBO's own SNFE. Any
+  // uncovered removal aborts the build instead of shipping a coverage hole.
+  let engineRecheck = null;
+  if (config.filter.network_optimize) {
+    engineRecheck = await verifyRemovedCoverage(
+      optimized.pre_opt_lines,
+      optimized.rules,
+      optimized.removed_network
+    );
+    if (engineRecheck.holes.length > 0) {
+      throw new Error(
+        `subsumption coverage hole: ${engineRecheck.holes.length} removed rule(s) ` +
+          `no longer block (${engineRecheck.holes.slice(0, 5).join(', ')}...)`
+      );
+    }
+  }
+
   // Subtract rules already provided by external lists the user enables.
   const providedLines = [];
   for (const list of config.provided_lists ?? []) {
@@ -94,6 +113,7 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
 
   return {
     optimized,
+    engineRecheck,
     summaries,
     sourcesOk,
     sourcesFailed: summaries.length - sourcesOk,

@@ -49,6 +49,7 @@ lists.json ──▶ Fetch ──▶ Preprocess ──▶ Normalize ──▶ An
 | Normalize | `src/normalize.js` | Translates cross-family syntax: hosts files to `||domain^`, strips hosting IP comments, drops `localhost` aliases, canonicalizes uBO/ABP redirect resource aliases. uBO-native `$empty`/`$mp4` pass through unchanged. |
 | Analyze | `src/ubo.js` + `src/analyze.js` | Parses every line with uBO's own `AstFilterParser` (`trustedSource:false`, exactly like uBO 1.74+) and classifies results into statistics. Applies the cosmetic preprocessing uBO itself performs (dead-operator detection, procedural rewrite). |
 | Optimize | `src/optimize.js` + `src/network.js` + `src/cosmetic.js` | Removes exact duplicates, sorts deterministically, applies provable network + cosmetic subsumption passes, and reports channel / token-bucket diagnostics. |
+| Recheck | `src/engine.js` | Compiles the survivors through uBO's `StaticNetFilteringEngine` and certifies that nothing the Optimize passes removed still needs to block — any coverage hole aborts the build. |
 | Write | `src/writer.js` | Emits `output/StayBrave-Classic.txt` with a full provenance/statistics header. |
 | Config | `src/config.js` | Validates `lists.json`, merges defaults. |
 
@@ -241,7 +242,15 @@ itself (dropped in Analyze) rather than by a hand-rolled mirror; the
 | `responseheader` (`^responseheader`) | Response-header modifier | kept |
 | `unsupported` | Comment/header/`$$` AdGuard cosmetics | skipped (counted) |
 | `unsupported_options` | Parseable but carries a modifier uBO rejected (`$urlskip`, `$replace`, `$dnsrewrite`, `$web_accessible_resource`, … — all the `trustedSource`/option-validation drops) | dropped (counted) |
-| `invalid` | Parser error (`astError != 0`) | dropped (counted) |
+| `invalid` | Parser error (`astError != 0`, or the embedded `ExtSelectorCompiler` rejecting a CSS-invalid cosmetic selector such as `.bad{selector}` via `HAS_ERROR`) | dropped (counted) |
+
+Classification uses the parser's own predicates (`isNetworkFilter`,
+`isCosmeticFilter`, `isScriptletFilter`, `isHtmlFilter`,
+`isResponseheaderFilter`, `isComment`) — the exact checks the shipped engine's
+compiler makes when it decides how to treat a line. `parseLine` also surfaces
+`parser.result.error` as `selectorError` (the ExtSelectorCompiler's position
+message, which is sticky across `parse()` and reset per line) so cosmetic
+rejections explain themselves.
 
 Because ABP ships `#$#`/`#%#` *snippet* syntax that uBO parses as style
 injection with a bogus selector, every ABP anti-circumvention snippet line
@@ -293,6 +302,21 @@ After exact-string dedup and deterministic sort:
   channels (simple class/id, complex token-led, generic-misc, hostname-hide,
   hostname-unhide, procedural); `tokenBucketEstimate` estimates uBO's network
   token-bucket split (hostname-tokened vs. catch-all bucket-0 rules).
+
+### 5a. Engine-certified optimizer recheck (`src/engine.js`)
+
+Every rule the subsumption passes remove is now certified by uBO's own
+engine before it can be committed. `verifyRemovedCoverage` compiles the
+*survivors* through `StaticNetFilteringEngine`, synthesizes the exact request
+a removed `||host/path^$opts` rule used to block (`removedProbe` — honoring
+the rule's type, scheme, party constraint and path, skipping regex/plain
+patterns it cannot probe cheaply), and requires that request to still be
+blocked. If it is not, the rule's removal is re-probed against the
+pre-optimization set: blocked there means a real coverage hole (build
+aborts); still not blocked means an exception such as `@@||host^` legitimately
+cancelled it and the removal is safe. A bounded sample (default 2000, spread
+evenly across the removed set) is verified every build — a pass-bug can no
+longer silently ship a coverage gap.
 
 ### 5b. Provided-list subtraction (`src/provided.js`)
 
@@ -378,7 +402,9 @@ node examples/verify.js [output] [probeLimit]
 ```
 
 1. **Parser gate** — every rule is reparsed with `AstFilterParser`
-   (`trustedSource:false`); any `astError != 0` fails the gate.
+   (`trustedSource:false`); any line flagged `hasError()` — which includes
+   cosmetic selectors the embedded ExtSelectorCompiler rejects even when
+   `astError` is 0 (e.g. `.bad{selector}`) — fails the gate.
 2. **Engine gate** — the whole file is compiled through the real
    `StaticNetFilteringEngine` (`useLists`); any dropped line (surfaced via the
    `events` callback) fails the gate.

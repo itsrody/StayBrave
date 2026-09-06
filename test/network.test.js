@@ -220,3 +220,18 @@ test('party constraint subsumed', () => {
   assert.equal(removed, 1);
   assert.deepEqual(kept, ['||example.com/ads^']);
 });
+test('subsume returns the removed lines as third element', () => {
+  const input = ['||example.com^', '||ads.example.com^'];
+  const [kept, count, removedLines] = subsume(input);
+  assert.equal(count, 1);
+  assert.deepEqual(kept, ['||example.com^']);
+  assert.deepEqual(removedLines, ['||ads.example.com^']);
+});
+
+test('subsumeScoped returns the removed lines as third element', () => {
+  const input = ['||example.com/ads^', '||example.com/ads^$script,third-party'];
+  const [kept, count, removedLines] = subsumeScoped(input);
+  assert.equal(count, 1);
+  assert.deepEqual(kept, ['||example.com/ads^']);
+  assert.deepEqual(removedLines, ['||example.com/ads^$script,third-party']);
+});

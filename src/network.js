@@ -139,7 +139,11 @@ export function subsume(lines) {
   }
 
   const kept = stripped.filter((_, i) => !removed.has(i));
-  return [kept, removed.size];
+  const removedLines = [];
+  for (let i = 0; i < stripped.length; i += 1) {
+    if (removed.has(i)) removedLines.push(stripped[i]);
+  }
+  return [kept, removed.size, removedLines];
 }
 
 export function countWildcardDomainRules(lines) {
@@ -191,6 +195,7 @@ export function subsumeScoped(lines) {
     lines.filter((l) => !l.includes('$'))
   );
   const kept = [];
+  const removedLines = [];
   let removed = 0;
   for (const line of lines) {
     const idx = line.lastIndexOf('$');
@@ -208,12 +213,13 @@ export function subsumeScoped(lines) {
       });
       if (dominated) {
         removed += 1;
+        removedLines.push(line);
         continue;
       }
     }
     kept.push(line);
   }
-  return [kept, removed];
+  return [kept, removed, removedLines];
 }
 
 // Approximate distribution across uBO's token buckets (diagnostics only).

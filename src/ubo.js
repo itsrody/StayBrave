@@ -83,31 +83,26 @@ export function makeParser({ keep_trusted_only = false, trustedScriptletTokens =
 }
 
 export function parseLine(parser, raw) {
+  // `result.error` is written by the embedded ExtSelectorCompiler whenever a
+  // cosmetic selector fails to compile — errors astError does not flag (e.g.
+  // `.bad{selector}`) — and is never cleared between parse() calls, so reset
+  // it here to read only the current line's verdict.
+  parser.result.error = undefined;
   parser.parse(raw);
   const flags = parser.astFlags;
-  const flavor = parser.astTypeFlavor;
   let kind;
-  if (parser.astType === AST_TYPE.NETWORK) {
+  // Classification through the parser's own predicates matches exactly how the
+  // filter compiler partitions lines inside the shipped engine.
+  if (parser.isNetworkFilter()) {
     kind = 'network';
-  } else if (parser.astType === AST_TYPE.EXTENDED) {
-    switch (flavor) {
-      case AST_TYPE.EXTENDED_COSMETIC:
-        kind = 'cosmetic';
-        break;
-      case AST_TYPE.EXTENDED_SCRIPTLET:
-        kind = 'scriptlet';
-        break;
-      case AST_TYPE.EXTENDED_HTML:
-        kind = 'html';
-        break;
-      case AST_TYPE.EXTENDED_RESPONSEHEADER:
-        kind = 'responseheader';
-        break;
-      default:
-        kind = 'extended-other';
-    }
+  } else if (parser.isExtendedFilter()) {
+    if (parser.isCosmeticFilter()) kind = 'cosmetic';
+    else if (parser.isScriptletFilter()) kind = 'scriptlet';
+    else if (parser.isHtmlFilter()) kind = 'html';
+    else if (parser.isResponseheaderFilter()) kind = 'responseheader';
+    else kind = 'extended-other';
   } else if (
-    parser.astType === AST_TYPE.COMMENT ||
+    parser.isComment() ||
     parser.astType === AST_TYPE.UNKNOWN ||
     parser.astType === AST_TYPE.NONE
   ) {
@@ -119,12 +114,13 @@ export function parseLine(parser, raw) {
     raw,
     ok: (flags & AST_FLAG.HAS_ERROR) === 0,
     kind,
-    flavor,
+    flavor: parser.astTypeFlavor,
     exception: (flags & AST_FLAG.IS_EXCEPTION) !== 0,
     unsupported: (flags & AST_FLAG.UNSUPPORTED) !== 0,
     error: parser.astError,
     options: (flags & AST_FLAG.HAS_OPTIONS) !== 0,
     strong: (flags & AST_FLAG.EXT_STRONG) !== 0,
+    selectorError: parser.result.error,
   };
 }
 

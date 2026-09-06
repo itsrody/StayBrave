@@ -84,6 +84,14 @@ try {
   console.log(
     `network subsumed: ${fmt(o.network_subsumed)} | scoped subsumed: ${fmt(o.scoped_subsumed)} | cosmetic subsumed: ${fmt(o.cosmetic_selectors_subsumed)} | procedural subsumed: ${fmt(o.procedural_subsumed)}`
   );
+  if (result.engineRecheck !== null && result.engineRecheck !== undefined) {
+    const r = result.engineRecheck;
+    console.log(
+      `engine coverage recheck: ${fmt(r.verified)}/${fmt(r.sampled)} removed rules still blocked by survivors` +
+        (r.unblocked_safe > 0 ? ` | ${fmt(r.unblocked_safe)} exception-cancelled` : '' ) +
+        (r.unprobeable > 0 ? ` | ${fmt(r.unprobeable)} unprobeable` : '')
+    );
+  }
   if (o.provided_rules > 0) {
     console.log(
       `provided (${o.provided_rules} rules): exact ${fmt(o.provided_exact_removed)} dropped | network-subsumed ${fmt(o.provided_network_subsumed)} | cosmetic-covered ${fmt(o.provided_cosmetic_covered)}`

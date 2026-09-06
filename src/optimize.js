@@ -20,14 +20,17 @@ export function optimize(rules, filter) {
 
   let networkSubsumed = 0;
   let scopedSubsumed = 0;
+  const removedNetwork = [];
   let active = unique;
   if (filter.network_optimize) {
-    const [afterBasic, n1] = subsume(active);
+    const [afterBasic, n1, r1] = subsume(active);
     active = afterBasic;
     networkSubsumed = n1;
-    const [afterScoped, n2] = subsumeScoped(active);
+    removedNetwork.push(...r1);
+    const [afterScoped, n2, r2] = subsumeScoped(active);
     active = afterScoped;
     scopedSubsumed = n2;
+    removedNetwork.push(...r2);
   }
 
   let cosmeticSubsumed = 0;
@@ -56,6 +59,8 @@ export function optimize(rules, filter) {
     procedural_subsumed: proceduralSubsumed,
     network_subsumed: networkSubsumed,
     scoped_subsumed: scopedSubsumed,
+    removed_network: removedNetwork,
+    pre_opt_lines: unique,
     wildcard_domain_rules: wildcardDomainRules,
     hostname_tokened: hostnameTokened,
     catch_all_estimated: catchAllEstimated,

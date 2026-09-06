@@ -1,5 +1,6 @@
 // Independent gate before a build is committed: parse the final list 100%
-// error-free with uBO's static-filter parser, compile the whole file through
+// error-free with uBO's static-filter parser (network `astError` and cosmetic
+// ExtSelectorCompiler errors alike), compile the whole file through
 // the real StaticNetworkFilteringEngine (SNFE), and probe a sample of the
 // simple option-less network rules with synthetic requests to prove they are
 // live (nothing was over-staticized/dropped by the optimizer). Also reports
@@ -28,6 +29,7 @@ const rules = lines.filter(
 
 let failed = 0;
 const byError = new Map();
+let selectorInvalid = 0;
 const parser = new AstFilterParser({ interactive: true, trustedSource: false });
 const probed = [];
 const modifierProbes = { removeparam: [], csp: [], permissions: [], uritransform: [] };
@@ -84,12 +86,21 @@ for (const line of rules) {
       modifierProbes[modName].push({ raw: line, host, value: mod.slice(modName.length + 1) });
     }
   }
+  parser.result.error = undefined;
   parser.parse(line);
   const err = parser.astError;
-  if (err !== 0) {
+  const hasErr = parser.hasError();
+  if (hasErr) {
     failed += 1;
     byError.set(err, (byError.get(err) ?? 0) + 1);
     if (failed <= 5) console.error('  parser error:', line, 'astError=', err);
+  }
+  const selectorErr = parser.result.error;
+  if (selectorErr !== undefined) {
+    selectorInvalid += 1;
+    if (selectorInvalid <= 5) {
+      console.error('  selector compile error:', line, '->', selectorErr.split('\n')[0]);
+    }
   }
 }
 
@@ -101,6 +112,10 @@ if (failed > 0) {
   process.exitCode = 1;
 } else {
   console.log(`source parser: ${rules.length} rules all clean`);
+}
+if (selectorInvalid > 0) {
+  console.error(`source parser: ${selectorInvalid} cosmetic selectors fail to compile`);
+  process.exitCode = 1;
 }
 
 // Compile through the real engine; uBO surfaces dropped lines via events.

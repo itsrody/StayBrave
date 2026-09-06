@@ -23,6 +23,15 @@ declare module '@gorhill/ubo-core/js/static-filtering-parser.js' {
     readonly astTypeFlavor: number;
     readonly astFlags: number;
     readonly astError: number;
+    readonly result: { error?: string };
+    isNetworkFilter(): boolean;
+    isExtendedFilter(): boolean;
+    isCosmeticFilter(): boolean;
+    isScriptletFilter(): boolean;
+    isHtmlFilter(): boolean;
+    isResponseheaderFilter(): boolean;
+    isComment(): boolean;
+    hasError(): boolean;
   }
 }
 

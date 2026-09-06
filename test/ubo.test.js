@@ -94,3 +94,28 @@ test('parser instance is stateless between parse() calls', () => {
   assert.equal(second.options, true);
   assert.equal((second.error & AST_ERROR.NONE) === 0, true);
 });
+
+test('analyzeText drops cosmetics that fail selector compilation', () => {
+  const filter = { keep_trusted_only: false, scriptlets: true, cosmetic_cost: {} };
+  const { lines, stats } = analyzeText(
+    'example.com##.valid\nexample.com##.bad{selector}\n',
+    filter,
+    false
+  );
+  assert.deepEqual(lines, ['example.com##.valid']);
+  assert.equal(stats.invalid, 1);
+});
+
+test('parseLine reports cosmetic selector-compile errors via selectorError', () => {
+  const parser = makeParser();
+  const invalid = parseLine(parser, 'example.com##.bad{selector}');
+  // The ExtSelectorCompiler rejects CSS-syntax-invalid selectors that astError
+  // does not flag; selectorError carries the position message and ok is false.
+  assert.equal(invalid.selectorError !== undefined, true);
+  assert.equal(invalid.ok, false);
+  const valid = parseLine(parser, 'example.com##.good');
+  assert.equal(valid.selectorError, undefined);
+  // selectorError is reset per parse() and never leaks across lines.
+  const after = parseLine(parser, 'other.example.org##.fine');
+  assert.equal(after.selectorError, undefined);
+});
