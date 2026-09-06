@@ -15,6 +15,7 @@ import { StaticNetFilteringEngine } from '@gorhill/ubo-core';
 import snfe from '@gorhill/ubo-core/js/static-net-filtering.js';
 import { AstFilterParser } from '@gorhill/ubo-core/js/static-filtering-parser.js';
 import { parseSimpleRule } from '../src/network.js';
+import { mirrorTokenFromPattern } from '../src/tokens.js';
 
 const MODIFIER_PROBE_LIMIT = 200;
 
@@ -33,6 +34,17 @@ let selectorInvalid = 0;
 const parser = new AstFilterParser({ interactive: true, trustedSource: false });
 const probed = [];
 const modifierProbes = { removeparam: [], csp: [], permissions: [], uritransform: [] };
+// Dispatch-lane profile: how each network rule reaches a request on the
+// onBeforeRequest path (see src/tokens.js). Mirrors FilterCompiler#makeToken
+// and the pure-hostname dictionary lane; informational, not a gate.
+const tokenProfile = {
+  hostname_dict: 0,
+  token_distinct: 0,
+  token_generic: 0,
+  token_short: 0,
+  tokenless: 0,
+  regex: 0,
+};
 
 function hostFromHostAnchor(line) {
   const rest = line.slice(2);
@@ -100,6 +112,20 @@ for (const line of rules) {
     selectorInvalid += 1;
     if (selectorInvalid <= 5) {
       console.error('  selector compile error:', line, '->', selectorErr.split('\n')[0]);
+    }
+  }
+  if (parser.isNetworkFilter()) {
+    const opts = parser.hasOptions();
+    if (parser.isHostnamePattern() && opts === false) {
+      tokenProfile.hostname_dict += 1;
+    } else if (parser.isRegexPattern()) {
+      tokenProfile.regex += 1;
+    } else {
+      const t = mirrorTokenFromPattern(parser.getNetPattern());
+      if (t === null) tokenProfile.tokenless += 1;
+      else if (t.token.length === 1) tokenProfile.token_short += 1;
+      else if (t.badness > 0) tokenProfile.token_generic += 1;
+      else tokenProfile.token_distinct += 1;
     }
   }
 }
@@ -248,5 +274,20 @@ if (modOkTotal + modFailTotal + modSkipTotal > 0) {
 const kinds2 = { network: kindCounts.network, cosmetic: kindCounts.cosmetic };
 console.log(
   `output: ${rules.length} rules (${kinds2.network} network, ${kinds2.cosmetic} cosmetic)`
+);
+
+const tp = tokenProfile;
+const tpTotal =
+  tp.hostname_dict + tp.token_distinct + tp.token_generic +
+  tp.token_short + tp.tokenless + tp.regex;
+const tpCheap = tp.hostname_dict + tp.token_distinct;
+const tpExpensive = tpTotal - tpCheap;
+console.log(
+  `engine token profile: ${tpTotal} network rules → ` +
+  `${tp.hostname_dict} hostname-dict lane / ${tp.token_distinct} distinctive-token / ` +
+  `${tp.token_generic} generic-token / ${tp.token_short} 1-char-token / ` +
+  `${tp.tokenless} tokenless / ${tp.regex} regex ` +
+  `— ${tpCheap} dispatch-cheap (${((100 * tpCheap) / tpTotal).toFixed(1)}%), ` +
+  `${tpExpensive} expensive-pron (${((100 * tpExpensive) / tpTotal).toFixed(1)}%)`
 );
 console.log(`exit: ${process.exitCode === 1 ? 'FAIL' : 'PASS'}`);

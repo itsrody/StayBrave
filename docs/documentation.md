@@ -423,6 +423,19 @@ node examples/verify.js [output] [probeLimit]
    modifier class that ships rules fails the gate. `$redirect`/`$redirect-rule`
    are intentionally not probed — this ubo-core build surfaces them only through
    `redirectEngine`, which requires an external redirect-resource engine.
+6. **Token profile** (informational) — every network rule is classified into
+   uBO's onBeforeRequest dispatch lanes via `src/tokens.js`, a mirror of
+   `FilterCompiler#makeToken`: pure hostname-dictionary (`||host^` / bare
+   `host`, probed without URL tokenization), distinctive-token (lowest-badness
+   run of `[%0-9A-Za-z]+`, matched only when that token is in the URL),
+   generic-token (in the engine's collated `badTokens` histogram, e.g. `cdn`,
+   `www`), 1-char-token, tokenless (`*ads*` — tested on every request), and
+   regex (token not mirrored). `BAD_TOKENS` parity with the pinned engine
+   source is asserted in `test/tokens.test.js`, so a ubo-core bump that
+   re-collates the histogram fails loudly. The formula this measures: rules
+   should be hostname-anchored, carry a distinctive token in their pattern, and
+   never abut a wildcard with their token run. Current output: 422,391 of
+   423,059 network rules (99.8%) are dispatch-cheap.
 
 Output ends with `exit: PASS` / `exit: FAIL`. `npm run verify` uses the
 defaults; the GitHub workflow runs it with the concrete output path.
