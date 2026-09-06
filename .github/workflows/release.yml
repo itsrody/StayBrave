@@ -1,13 +1,22 @@
-name: Build and publish StayBrave-Classic.txt
+name: Publish StayBrave-Classic.txt
 
-on:
+"on":
   schedule:
     # Runs at midnight UTC every 3rd day of the month (~every 72h).
     - cron: "0 0 */3 * *"
   workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to check out, build, and publish to
+        required: false
+        default: classic
+      run_tests:
+        description: Run unit tests before compiling
+        type: boolean
+        default: true
 
 concurrency:
-  group: publish
+  group: publish-${{ inputs.branch || 'classic' }}
   # Only the newest build matters; cancel any queued run so it cannot race
   # the commit/push step.
   cancel-in-progress: true
@@ -20,8 +29,19 @@ jobs:
     name: Generate and publish StayBrave-Classic.txt
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
+      - name: Resolve target branch
+        id: branch
+        run: |
+          BRANCH="${{ inputs.branch || 'classic' }}"
+          case "$BRANCH" in
+            *[!A-Za-z0-9_/.-]* ) echo "invalid branch: $BRANCH"; exit 1 ;;
+          esac
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Check out repository (${{ steps.branch.outputs.branch }})
         uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.branch.outputs.branch }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -33,6 +53,7 @@ jobs:
         run: npm ci
 
       - name: Run unit tests
+        if: ${{ inputs.run_tests != false }}
         run: npm test
 
       - name: Generate StayBrave-Classic.txt
@@ -45,18 +66,27 @@ jobs:
           grep -q '^! Version: ' output/StayBrave-Classic.txt || { echo "missing version metadata"; exit 1; }
           grep -q '^! Expires: ' output/StayBrave-Classic.txt || { echo "missing expires metadata"; exit 1; }
           echo "output OK: $(wc -l < output/StayBrave-Classic.txt) lines"
-          # Full gate: every rule must parse with uBO's own static-filter parser,
-          # the whole file must compile through the real StaticNetFilteringEngine
-          # with zero dropped lines, and a sample of simple option-less rules must
-          # still block synthetic requests.
+          # Full gate: every rule must parse with uBO's own static-filter
+          # parser, the whole file must compile through the real
+          # StaticNetFilteringEngine with zero dropped lines, and a sample of
+          # simple option-less rules must still block synthetic requests.
           node examples/verify.js output/StayBrave-Classic.txt
 
-      - name: Commit and push StayBrave-Classic.txt
+      - name: Commit and push when rules changed
         run: |
+          BRANCH="${{ steps.branch.outputs.branch }}"
+          # Only publish when the rule content changed; the timestamped header
+          # (Version / Last modified) alone does not warrant a commit, so
+          # upstream churn that leaves the rules identical produces no-op runs.
+          git show "HEAD:output/StayBrave-Classic.txt" 2>/dev/null \
+            | grep -v -E '^[![]' > /tmp/rules_old.txt || true
+          grep -v -E '^[![]' output/StayBrave-Classic.txt > /tmp/rules_new.txt
+          if cmp -s /tmp/rules_old.txt /tmp/rules_new.txt; then
+            echo "rules unchanged ($(wc -l < /tmp/rules_new.txt) rules); nothing to publish"
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add output/StayBrave-Classic.txt
-          git commit -m "Update StayBrave-Classic.txt ($(date -u +'%Y-%m-%d'))"
-          git fetch origin main
-          git rebase origin/main
-          git push origin HEAD:main
+          git commit -m "Update StayBrave-Classic.txt ($(wc -l < /tmp/rules_new.txt) rules, $(date -u +'%Y-%m-%d %H:%M UTC'))"
+          git push origin "HEAD:$BRANCH"
