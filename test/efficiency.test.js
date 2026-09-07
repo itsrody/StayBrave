@@ -24,6 +24,12 @@ test('classifyNetwork mirrors uBO token-bucket dispatch', () => {
     ['/ads/', Channel.NetworkTokened],
     ['ads', Channel.NetworkTokened],
     ['1234', Channel.NetworkTokened],
+    // Engine-verified: a pattern-less rule compiles to the same just-origin
+    // unit as `*$…`, so the strict grammar resolves to just-origin, not
+    // catchall.
+    ['$domain=example.com', Channel.NetworkJustOrigin],
+    ['@@$domain=example.com', Channel.NetworkJustOrigin],
+    ['$script,domain=example.com', Channel.NetworkCatchall],
   ];
   for (const [line, want] of cases) {
     assert.equal(classifyNetwork(line), want, line);

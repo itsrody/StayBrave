@@ -375,6 +375,51 @@ if (ce.dropped.length > 0) {
 let cosOk = 0;
 let cosFail = 0;
 {
+  // The engine may normalize whitespace (e.g. a space after commas inside
+  // :not()), and it reserializes attribute strings with double quotes (so an
+  // unquoted/single-quoted source rule comes back as double-quoted CSS), so
+  // compare both sides through the same normalization: collapse whitespace
+  // runs outside quoted strings, swap quote characters, and strip the comma
+  // uBO appends between selector set members. A specific rule comes back one
+  // way: declarative selectors land on their own (trimmed, comma-lipped) line
+  // of injectedCSS (incl. :style() converted to a CSS rule),
+  // procedural/pseudo selectors land as a JSON task whose `raw` is the rule
+  // selector — route by what the engine actually returned, not by a local
+  // classification that may disagree with the engine's.
+  const collapseWS = (s) => {
+    let out = '';
+    let quote = null;
+    let wasWS = false;
+    for (const ch of s) {
+      if (quote !== null) {
+        out += ch;
+        if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+        out += ch;
+      } else if (/\s/.test(ch)) {
+        wasWS = true;
+      } else {
+        if (wasWS) out += ' ';
+        wasWS = false;
+        out += ch;
+      }
+    }
+    return out;
+  };
+  const norm = (s) =>
+    collapseWS(s.trim())
+      .replace(/,$/, '')
+      .replace(/,(?=\S)/g, ', ')
+      .replace(/\s*([>+~])\s*/g, ' $1 ')
+      .replace(/'/g, '"'); // quote chars are interchangeable in CSS strings
+  // uBO reserializes attribute strings with double quotes (`[class*=x]` comes
+  // back as `[class*="x"]`), which is CSS-value-identical only when compared
+  // without the quotes, and a scoped exception may legitimately withdraw a
+  // hide on exactly one host of a multi-host rule. So a probe counts as
+  // missing only when no positive host of the rule's scope delivers the
+  // selector, and a quotes-stripped retry is made before declaring it gone.
+  const qu = (s) => s.replace(/["']/g, '');
   const stride =
     cosmeticEngineLines.length > probeLimit
       ? Math.ceil(cosmeticEngineLines.length / probeLimit)
@@ -385,73 +430,46 @@ let cosFail = 0;
     const idx = line.indexOf('##');
     const hostPart = line.slice(0, idx);
     if (hostPart === '' || hostPart.startsWith('~')) continue;
-    const firstHost = hostPart.split(',')[0].trim();
-    if (!/^[a-z0-9][a-z0-9.-]*$/.test(firstHost)) continue;
+    const hosts = hostPart.split(',');
     const selector = line.slice(idx + 2);
     if (selector === '') continue;
-    const domain = parseHost(firstHost, { allowPrivateDomains: true }).domain ?? firstHost;
-    const out = ce.probe(firstHost, domain, `http://${firstHost}/`);
-    // The engine may normalize whitespace (e.g. a space after commas inside
-    // :not()), and it reserializes attribute strings with double quotes (so a
-    // single-quoted source rule comes back as double-quoted CSS), so compare
-    // both sides through the same normalization. A specific
-    // rule comes back exactly one way: declarative selectors land on their own
-    // (trimmed, comma-lipped) line of injectedCSS (incl. :style() converted to
-    // a CSS rule), procedural/pseudo selectors land as a JSON task whose `raw`
-    // is the rule selector. Route by what the engine actually returned, not by
-    // a local classification that may disagree with the engine's.
-    // Collapse whitespace runs outside quoted strings: CSS treats any run of
-    // whitespace in a selector as one separator, so the engine's reserialized
-    // rule (`a  b` -> `a b`) must compare equal to the source rule. Runs inside
-    // a quoted attribute value are preserved so distinct strings stay distinct.
-    const collapseWS = (s) => {
-      let out = '';
-      let quote = null;
-      let wasWS = false;
-      for (const ch of s) {
-        if (quote !== null) {
-          out += ch;
-          if (ch === quote) quote = null;
-        } else if (ch === '"' || ch === "'") {
-          quote = ch;
-          out += ch;
-        } else if (/\s/.test(ch)) {
-          wasWS = true;
-        } else {
-          if (wasWS) out += ' ';
-          wasWS = false;
-          out += ch;
-        }
+    let present = false;
+    let probedAny = false;
+    for (const rawHost of hosts) {
+      const firstHost = rawHost.trim();
+      if (!/^[a-z0-9][a-z0-9.-]*$/.test(firstHost)) continue;
+      probedAny = true;
+      const domain = parseHost(firstHost, { allowPrivateDomains: true }).domain ?? firstHost;
+      const out = ce.probe(firstHost, domain, `http://${firstHost}/`);
+      const cssLines = (out.injectedCSS ?? '')
+        .split('\n')
+        .map((s) => norm(s));
+      const procLines = (out.proceduralFilters ?? [])
+        .concat(out.convertedProceduralFilters ?? [])
+        .map((p) => {
+          try {
+            return norm(JSON.parse(p).raw);
+          } catch {
+            return null;
+          }
+        });
+      const ref = norm(selector);
+      let found =
+        cssLines.includes(ref) ||
+        procLines.includes(ref);
+      if (!found) {
+        found =
+          cssLines.map((s) => qu(s)).includes(qu(ref)) ||
+          procLines.map((s) => qu(s)).includes(qu(ref));
       }
-      return out;
-    };
-    const norm = (s) =>
-      collapseWS(s.trim())
-        .replace(/,$/, '')
-        .replace(/,(?=\S)/g, ', ')
-        .replace(/\s*([>+~])\s*/g, ' $1 ')
-        .replace(/'/g, '"'); // quote chars are interchangeable in CSS strings
-    const cssLines = (out.injectedCSS ?? '')
-      .split('\n')
-      .map((s) => norm(s));
-    const rawProcs = (out.proceduralFilters ?? []).map((p) => {
-      try {
-        return norm(JSON.parse(p).raw);
-      } catch {
-        return null;
+      if (found) {
+        present = true;
+        break;
       }
-    });
-    const rawConverted = (out.convertedProceduralFilters ?? []).map((p) => {
-      try {
-        return norm(JSON.parse(p).raw);
-      } catch {
-        return null;
-      }
-    });
-    const present =
-      cssLines.includes(norm(selector)) ||
-      rawProcs.includes(norm(selector)) ||
-      rawConverted.includes(norm(selector));
+    }
+    // Wildcard/excluded host patterns (`amazon.*##…`, `~bad.net,good.net##…`)
+    // have no probeable concrete host — skip, do not fail them.
+    if (probedAny === false) continue;
     if (present) {
       cosOk += 1;
     } else {

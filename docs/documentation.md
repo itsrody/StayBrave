@@ -81,9 +81,9 @@ lists.json ──▶ Fetch ──▶ Preprocess ──▶ Normalize ──▶ An
 | Preprocess | `src/preprocess.js` | Evaluates uBO preparser directives (`!#if` / `!#else` / `!#endif`) against the desktop-Firefox token environment and resolves `!#include`. |
 | Normalize | `src/normalize.js` | Translates cross-family syntax: hosts files to `||domain^`, strips hosting IP comments, drops `localhost` aliases, canonicalizes uBO/ABP redirect resource aliases. uBO-native `$empty`/`$mp4` pass through unchanged. |
 | Analyze | `src/ubo.js` + `src/analyze.js` | Parses every line with uBO's own `AstFilterParser` (`trustedSource:false`, exactly like uBO 1.74+) and classifies results into statistics. Applies the cosmetic preprocessing uBO itself performs (dead-operator detection, procedural rewrite). |
-| Optimize | `src/optimize.js` + `src/network.js` + `src/cosmetic.js` + `src/rewrite.js` + `src/efficiency.js` | Canonicalizes net-option spellings, removes exact duplicates, sorts deterministically, applies provable network + cosmetic subsumption passes, emits engine-gated superset/dead-rule candidates, and reports SNFE-mirrored token-bucket + A–F efficiency grades. |
+| Optimize | `src/optimize.js` + `src/network.js` + `src/cosmetic.js` + `src/rewrite.js` + `src/efficiency.js` | Canonicalizes net-option spellings to uBO's strict grammar (`$1p`→`$first-party`, pattern-less → `*`, options sorted with exact duplicates collapsed), removes exact duplicates, sorts deterministically, applies provable network + cosmetic subsumption passes, emits engine-gated superset/dead-rule/dead-exception candidates, and reports SNFE-mirrored token-bucket + A–F efficiency grades. |
 | Cosmetics | `src/cosmetic-engine.js` + `vendor/ubo/` | Runs every `##`/`#@#` rule through uBO's vendored `CosmeticFilteringEngine` (identical parser + writer/reader) and removes the rules stock uBO drops at load — the generic procedural filters that `allowGenericProceduralFilters:false` discards. `filter.cosmetic_engine_filter` gates the pass (default on). |
-| Recheck | `src/engine.js` + `src/cosmetic-engine.js` | Gates the superset/dead-rule candidates through uBO's own static network + cosmetic engines (only engine-certified removals ship), then compiles the survivors and certifies that nothing Optimize passed removed still needs to block — any coverage hole aborts the build. |
+| Recheck | `src/engine.js` + `src/cosmetic-engine.js` | Gates the superset/dead-rule/dead-exception candidates through uBO's own static network + cosmetic engines (only engine-certified removals ship), then compiles the survivors and certifies that nothing Optimize passed removed still needs to block — any coverage hole aborts the build. |
 | Write | `src/writer.js` | Emits `output/StayBrave-Classic.txt` with a full provenance/statistics header. |
 | Config | `src/config.js` | Validates `lists.json`, merges defaults. |
 
@@ -214,6 +214,17 @@ node src/main.js --help
     selector an exception already withdraws across its whole scope (equal,
     broader-host, or generic exception). Engine-delivery-certified before
     removal.
+  - `network_dead_exception` (default `true`) — emit *candidate* dead
+    `@@` network-exception removals: a whitelist rule that (per the
+    host/path/type/party/scope indexing in `subsumeDeadExceptions`) suppresses
+    no surviving block. Each candidate is probed through uBO's own
+    `StaticNetFilteringEngine` with the candidate excluded from the survivors —
+    an exception must not certify itself — and only exceptions whose removal
+    provably changes no request outcome are shipped.
+  - `cosmetic_dead_exception` (default `true`) — emit *candidate* dead `#@#`
+    cosmetic-exception removals: an exception whose selector no weak `##` hide
+    carries (a strong `#?#` hide is never withdrawn by a weak exception, so it
+    cannot keep one alive). Engine-delivery-certified before removal (see 5d).
   - `cosmetic_cost` — independent toggles for the cosmetic passes
     (`split_comma_lists` default off — pure-CSS comma lists are canonicalized
     to grouped form instead of split; `subsume_selectors`, `subsume_procedural`
@@ -435,6 +446,48 @@ Both gates run in the pipeline (recording `superset_candidates` /
 `cosmetic_dead_removed` in the output header) before the recheck below; the
 certified network removals are folded back into the set `verifyRemovedCoverage`
 samples, so nothing engine-certified can bypass the existing coverage gate.
+
+### 5ab. Dead exception gates (inert rules, not silently kept)
+
+Bad *format* rules — `@@` whitelists that suppress no surviving block and `#@#`
+exceptions whose selector no hide carries — are not just slow, they are inert:
+uBO still indexes and tests them on every matching request. Two more gates
+certify their removal.
+
+- **Network dead-exception gate** (`certifyDeadExceptionRemovals`): the
+  candidate set comes from `subsumeDeadExceptions`, which indexes every block
+  (exact-host buckets plus label-suffix buckets, all paths — a pathless
+  exception also reaches a deeper host's path-prefixed block) and keeps only
+  exceptions no block can reach, after skipping `~`/negated, unparseable and
+  modifier-carrying shapes. For each candidate the gate probes against the
+  survivor set **with the candidate excluded**, at the exception's own
+  first-party context (unless the exception is party-unpinned), the first
+  positive `domain=` document host, and a synthetic third-party origin; when
+  the exception is not type-pinned, every uBO request type is probed so a
+  type-restricted binding block still surfaces. A candidate is certified only
+  if **every** probe is unblocked — with the exception present elsewhere, so a
+  single blocked probe marks it rejected (a later unblocked probe cannot
+  resurrect it). Exceptions are the one rule that could certify themselves, so
+  the exclusion here is mandatory, and because the candidates index
+  `optimized.rules`, the pair-removal case (dead block + its exception) can
+  never arise: an exception that binds a block is not a candidate in the first
+  place.
+- **Cosmetic dead-exception gate** (`certifyDeadCosmeticExceptions`): each
+  candidate `#@#` exception (from `deadCosmeticExceptions`, which compares
+  against weak `##` hides only, and skips HTML, response-header and `+js`
+  scriptlet exceptions as opaque to the engine) is probed at every positive
+  host of its scope through uBO's vendored cosmetic engine with the candidates
+  removed from the rule set; a certificate is issued exactly when the selector
+  appears in neither the injected selectors nor the procedural filters — the
+  removal delivers nothing the hide rules were not already withholding.
+  Engine-verified and pinned: a strong `#?#` hide is *not* withdrawn by a weak
+  exception, so a strong hide never keeps an exception alive.
+
+Both gates record `engine_dead_exception_candidates_count` /
+`engine_dead_exception_removed` and `cosmetic_dead_exception_candidates_count`
+/ `cosmetic_dead_exception_removed` in the output header. They run against the
+*post-superset* survivor set, after the network-removal gate above, so their
+certificates reflect exactly what ships.
 
 ### 5b. Provided-list subtraction (`src/provided.js`)
 

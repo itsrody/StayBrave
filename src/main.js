@@ -108,6 +108,16 @@ try {
       `cosmetic dead-hide gate: ${fmt(o.cosmetic_dead_candidates_count)} candidate(s), ${fmt(o.cosmetic_dead_removed)} certified exception-withdrawn & removed`
     );
   }
+  if (o.engine_dead_exception_candidates_count > 0) {
+    console.log(
+      `dead-exception gate: ${fmt(o.engine_dead_exception_candidates_count)} candidate(s), ${fmt(o.engine_dead_exception_removed)} certified inert & removed (${fmt(o.engine_dead_exception_candidates_count - o.engine_dead_exception_removed)} rejected as still suppressing)`
+    );
+  }
+  if (o.cosmetic_dead_exception_candidates_count > 0) {
+    console.log(
+      `cosmetic dead-exception gate: ${fmt(o.cosmetic_dead_exception_candidates_count)} candidate(s), ${fmt(o.cosmetic_dead_exception_removed)} certified selector-less & removed`
+    );
+  }
   if (o.canonicalized_rules > 0) {
     console.log(
       `rewrites: ${fmt(o.canonicalized_rules)} net-option spelling(s) canonicalized to uBO synonyms (alias duplicates collapsed)`

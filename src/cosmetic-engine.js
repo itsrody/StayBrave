@@ -187,3 +187,63 @@ export async function certifyCosmeticDeadHides(
   }
   return certified;
 }
+
+// Authoritative evidence gate for the dead cosmetic-exception candidates
+// (`deadCosmeticExceptions`): a `#@#selector` rule is only certified for
+// removal when uBO's own cosmetic engine, with every candidate EXCLUDED (an
+// exception must not certify itself), refuses to deliver that selector at any
+// positive host of the exception's scope. A selector that is not delivered
+// post-removal proves no hide was relying on the exception to be withdrawn,
+// so the exception is inert and its removal changes nothing.
+export async function certifyDeadCosmeticExceptions(
+  candidateLines,
+  allLines,
+  { name = 'staybrave' } = {}
+) {
+  const candidateSet = new Set(candidateLines);
+  const without = allLines.filter((l) => !candidateSet.has(l));
+  const { probe } = await makeCosmeticEngine(without, { name });
+  const certified = [];
+  for (const line of candidateLines) {
+    const idx = line.indexOf('#@#');
+    if (idx === -1) continue;
+    const selector = line.slice(idx + 3);
+    const hostPart = line.slice(0, idx);
+    const hosts =
+      hostPart === ''
+        ? ['www.example.org']
+        : hostPart
+            .split(',')
+            .map((h) => h.trim().toLowerCase())
+            .filter(
+              (h) =>
+                h !== '' &&
+                h.startsWith('~') === false &&
+                h.includes('*') === false &&
+                /^[0-9a-zA-Z.-]+$/.test(h)
+            );
+    if (hosts.length === 0) continue;
+    let stillAbsent = true;
+    for (const h of hosts) {
+      const domain = registrableDomain(h);
+      const out = probe(h, domain ?? h, `http://${h}/`);
+      const injected = (out.injectedCSS ?? '')
+        .split('\n')
+        .map((s) => s.trim().replace(/,$/, ''));
+      const procs = [...(out.proceduralFilters ?? []), ...(out.convertedProceduralFilters ?? [])]
+        .map((p) => {
+          try {
+            return JSON.parse(p).raw;
+          } catch {
+            return null;
+          }
+        });
+      if (injected.includes(selector) || procs.includes(selector)) {
+        stillAbsent = false;
+        break;
+      }
+    }
+    if (stillAbsent) certified.push(line);
+  }
+  return certified;
+}

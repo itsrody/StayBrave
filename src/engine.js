@@ -242,3 +242,110 @@ export async function certifySupersetRemovals(candidateLines, survivorLines, dea
   }
   return { certified, candidates: candidateLines };
 }
+
+// Authoritative evidence gate for the dead network-exception candidates
+// (`subsumeDeadExceptions`): a `@@` whitelist rule that suppresses no block is
+// certified for removal only when, with the candidate EXCLUDED from the
+// survivors (an exception must not certify itself), every probe that the
+// exception would affect is still UNBLOCKED — proving no surviving block binds
+// its whitelist universe, so removing it changes no request outcome.
+//
+// Only a small bounded set of origins is probed, but it covers every bind
+// direction the removal could change: the exception's own first-party context,
+// its first `domain=` document, and a synthetic third-party context (plus all
+// party/type combinations when the exception is not type-pinned). If a block
+// bind existed under the exception's scope, at least one of these probes
+// would turn blocked.
+export async function certifyDeadExceptionRemovals(candidateLines, survivorLines) {
+  const candidateSet = new Set(candidateLines);
+  const probeSet = survivorLines.filter((l) => !candidateSet.has(l));
+
+  const probes = [];
+  for (const line of candidateLines) {
+    const body = line.slice(2);
+    const idx = body.lastIndexOf('$');
+    const pattern = idx < 0 ? body : body.slice(0, idx);
+    const opts = idx < 0 ? [] : body.slice(idx + 1).split(',').map((o) => o.trim());
+    const simple = parseSimpleRule(pattern);
+    if (simple === null) continue;
+    const typeMap = {
+      script: 'script', image: 'image', stylesheet: 'stylesheet',
+      subdocument: 'sub_frame', xmlhttprequest: 'xmlhttprequest', xhr: 'xmlhttprequest',
+      object: 'object', media: 'media', font: 'font', websocket: 'websocket',
+      ping: 'ping', other: 'other', document: 'main_frame', popup: 'popup',
+      'object-subrequest': 'object',
+    };
+    let types;
+    if (opts.includes('document')) types = ['main_frame'];
+    else if (opts.includes('popup')) types = ['popup'];
+    else {
+      const pinned = opts.map((o) => typeMap[o]).filter(Boolean);
+      types = pinned.length > 0
+        ? pinned
+        // No type pinned: sample every uBO request type so a binding block
+        // restricted to any one type still surfaces in the probe.
+        : ['script', 'image', 'stylesheet', 'sub_frame', 'xmlhttprequest',
+           'object', 'media', 'font', 'websocket', 'ping', 'other'];
+    }
+
+    const scheme = opts.includes('https') && !opts.includes('http') ? 'https' : 'http';
+    const token = Math.random().toString(36).slice(2, 10);
+    const pp = simple.path === '' ? '' : simple.path.replace(/\/$/, '') + '/';
+    const url = `${scheme}://${simple.host}/${pp}probe-${token}.js`;
+
+    const firstParty = opts.some((o) => o === 'first-party' || o === '1p');
+    const thirdParty = opts.some((o) => o === 'third-party' || o === '3p');
+    const origins = new Set();
+    if (firstParty || (thirdParty === false && opts.some((o) => o.startsWith('domain=')) === false)) {
+      origins.add(`${scheme}://${simple.host}/`);
+    }
+    let scopeOrigin = null;
+    for (const o of opts) {
+      if (o.startsWith('domain=')) {
+        const d = o.slice(7).split('|').map((x) => x.trim())
+          .find((x) => x && !x.startsWith('~') && !x.includes('*') && /^[0-9a-zA-Z.-]+$/.test(x));
+        if (d !== undefined) { scopeOrigin = `http://${d.toLowerCase()}/`; break; }
+      }
+    }
+    if (scopeOrigin !== null) origins.add(scopeOrigin);
+    if (thirdParty || origins.size === 0) origins.add(`http://origin-${token}.example.net/`);
+    for (const originURL of origins) {
+      for (const type of types) {
+        probes.push({ line, probe: { url, type, originURL, tabId: 1, docId: 1, frameId: 0 } });
+      }
+    }
+  }
+
+  const engine = await StaticNetFilteringEngine.create();
+  let certified = [];
+  try {
+    if (probeSet.length > 0) {
+      await engine.useLists([{ name: 'staybrave-certify-dead-exceptions', raw: probeSet.join('\n') }]);
+    }
+    const perLine = new Map();
+    for (const { line, probe } of probes) {
+      const res = await engine.matchRequest(probe);
+      const blocked = (res & 1) === 1;
+      if (blocked) {
+        // A surviving block binds the exception's universe: removing it would
+        // turn a previously-whitelisted request into a blocked one.
+        perLine.set(line, 'rejected');
+        continue;
+      }
+      if (perLine.has(line) && perLine.get(line) === 'rejected') continue;
+      if (!perLine.has(line)) perLine.set(line, { total: 0, okay: 0 });
+      const acc = perLine.get(line);
+      acc.total += 1;
+      acc.okay += 1;
+    }
+    for (const line of candidateLines) {
+      const acc = perLine.get(line);
+      if (acc !== undefined && acc !== 'rejected' && acc.okay === acc.total) {
+        certified.push(line);
+      }
+    }
+  } finally {
+    await StaticNetFilteringEngine.release();
+  }
+  return { certified, candidates: candidateLines };
+}

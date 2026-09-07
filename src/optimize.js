@@ -9,8 +9,8 @@
 // must survive the passes below, so post-optimization counts are tallied and
 // surfaced in the writer header / CLI as a first-class metric.
 
-import { subsume, subsumeScoped, tokenBucketEstimate, countWildcardDomainRules, subsumeSuperset, subsumeDeadByException } from './network.js';
-import { subsumeSelectors, subsumeProcedural, channelCounts, deadHidesByException } from './cosmetic.js';
+import { subsume, subsumeScoped, tokenBucketEstimate, countWildcardDomainRules, subsumeSuperset, subsumeDeadByException, subsumeDeadExceptions } from './network.js';
+import { subsumeSelectors, subsumeProcedural, channelCounts, deadHidesByException, deadCosmeticExceptions } from './cosmetic.js';
 import { canonicalizeRules } from './rewrite.js';
 import { analyzeEfficiency } from './efficiency.js';
 
@@ -128,6 +128,19 @@ export function optimize(rules, filter) {
     cosmeticDeadCandidates = deadHidesByException(active).removed_lines;
   }
 
+  // Dead invisible-rule candidates: a `@@` exception that suppresses no block
+  // (`subsumeDeadExceptions`) and a `#@#` exception whose selector no hide has
+  // (`deadCosmeticExceptions`). Candidate-only — the engine gates probe with
+  // the candidates removed and certify each one changes no outcome.
+  let deadExceptionCandidates = [];
+  if (filter.network_optimize && filter.network_dead_exception !== false) {
+    deadExceptionCandidates = subsumeDeadExceptions(active).removed_lines;
+  }
+  let cosmeticDeadExceptionCandidates = [];
+  if (filter.cosmetic_dead_exception !== false) {
+    cosmeticDeadExceptionCandidates = deadCosmeticExceptions(active).removed_lines;
+  }
+
   const channels = channelCounts(active);
   const [tokened, justOrigin, catchAll] = tokenBucketEstimate(active);
   const wildcardDomainRules = countWildcardDomainRules(active);
@@ -149,6 +162,8 @@ export function optimize(rules, filter) {
     engine_superset_candidates: supersetCandidates,
     engine_dead_candidates: deadByExceptionCandidates,
     cosmetic_dead_candidates: cosmeticDeadCandidates,
+    engine_dead_exception_candidates: deadExceptionCandidates,
+    cosmetic_dead_exception_candidates: cosmeticDeadExceptionCandidates,
     wildcard_domain_rules: wildcardDomainRules,
     token_buckets: { tokened, justOrigin, catchAll },
     hostname_tokened: tokened,

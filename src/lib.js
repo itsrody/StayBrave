@@ -5,8 +5,8 @@ import { Fetcher } from './fetch.js';
 import { analyzeText, emptyStats } from './analyze.js';
 import { makeParser, TRUSTED_SCRIPTLET_TOKENS } from './ubo.js';
 import { optimize, refreshDiagnostics } from './optimize.js';
-import { verifyRemovedCoverage, certifySupersetRemovals } from './engine.js';
-import { detectDroppedCosmetics, certifyCosmeticDeadHides } from './cosmetic-engine.js';
+import { verifyRemovedCoverage, certifySupersetRemovals, certifyDeadExceptionRemovals } from './engine.js';
+import { detectDroppedCosmetics, certifyCosmeticDeadHides, certifyDeadCosmeticExceptions } from './cosmetic-engine.js';
 import { subtractProvided } from './provided.js';
 import { writeOutput } from './writer.js';
 
@@ -102,6 +102,27 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
     }
   }
 
+  // Dead cosmetic-exception gate: remove only the `#@#` exceptions whose
+  // selector no hide carries, certified by uBO's own cosmetic engine (with the
+  // candidates removed) to deliver nothing extra.
+  const cosmeticDeadExcCandidates = optimized.cosmetic_dead_exception_candidates ?? [];
+  optimized.cosmetic_dead_exception_candidates_count = cosmeticDeadExcCandidates.length;
+  optimized.cosmetic_dead_exception_removed = 0;
+  if (cosmeticDeadExcCandidates.length > 0) {
+    const certifiedDeadExc = await certifyDeadCosmeticExceptions(
+      cosmeticDeadExcCandidates,
+      optimized.rules,
+      { name: config.output.title }
+    );
+    if (certifiedDeadExc.length > 0) {
+      const set = new Set(certifiedDeadExc);
+      const keep = [];
+      for (const l of optimized.rules) if (!set.has(l)) keep.push(l);
+      optimized.cosmetic_dead_exception_removed = optimized.rules.length - keep.length;
+      optimized.rules = keep;
+    }
+  }
+
   // Gate the candidate superset / dead-block network removals through uBO's own
   // engine. The predicate is deliberately permissive; only the candidates the
   // survivor set still blocks are actually removed, so the shipped removals
@@ -127,6 +148,26 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
     optimized.rules = keep;
     if (optimized.superset_removed > 0) {
       optimized.removed_network.push(...engineSuperset.certified);
+    }
+  }
+
+  // Dead network-exception gate: only the `@@` exceptions the engine proves
+  // suppress no surviving block (with the candidates excluded from the probe
+  // set) are removed, so dropping them cannot un-suppress any request.
+  const deadExcCandidates = optimized.engine_dead_exception_candidates ?? [];
+  optimized.engine_dead_exception_candidates_count = deadExcCandidates.length;
+  optimized.engine_dead_exception_removed = 0;
+  if (deadExcCandidates.length > 0) {
+    const certifiedDeadExc = await certifyDeadExceptionRemovals(
+      deadExcCandidates,
+      optimized.rules
+    );
+    if (certifiedDeadExc.certified.length > 0) {
+      const set = new Set(certifiedDeadExc.certified);
+      const keep = [];
+      for (const l of optimized.rules) if (!set.has(l)) keep.push(l);
+      optimized.engine_dead_exception_removed = optimized.rules.length - keep.length;
+      optimized.rules = keep;
     }
   }
 

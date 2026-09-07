@@ -280,20 +280,22 @@ export function tokenBucketEstimate(lines) {
         const name = t.indexOf('=') === -1 ? t : t.slice(0, t.indexOf('='));
         return name === 'domain' || name === 'from';
       });
-    if (pattern === '*') {
+    // A pattern-less rule compiles to the same just-origin unit as `*`.
+    const effective = pattern === '' ? '*' : pattern;
+    if (effective === '*') {
       if (onlyDomain) { justOrigin += 1; continue; }
       catchAll += 1;
       continue;
     }
     if (
-      (pattern.startsWith('|http://') || pattern.startsWith('|https://')) &&
+      (effective.startsWith('|http://') || effective.startsWith('|https://')) &&
       onlyDomain
     ) {
       justOrigin += 1;
       continue;
     }
 
-    if (patternIncludesDurableRun(pattern)) {
+    if (patternIncludesDurableRun(effective)) {
       tokened += 1;
       continue;
     }
@@ -624,6 +626,101 @@ export function subsumeDeadByException(lines) {
   return {
     removed_lines: [...candidate].sort(),
   };
+}
+
+// Dead network-exception candidates: a `@@` whitelist rule that suppresses NO
+// block in the merged set (no block is reachable by host/path AND compatible
+// by type/party/scope). Such an exception can never change a request outcome —
+// it is inert weight the engine still indexes. Candidate-only: the engine gate
+// (`certifyDeadExceptionRemovals`) probes each candidate with the exception
+// removed and only certifies those whose removal provably changes nothing.
+//
+// Blocks are indexed the same way `subsumeSuperset` indexes covers
+// (exact-host buckets + label-suffix buckets), but here EVERY block goes into
+// the suffix buckets regardless of path: a pathless exception also reaches a
+// deeper host's path-prefixed rule (`@@||example.com^` unbinds
+// `||www.example.com/ads^`), so the predicate must see those too.
+export function subsumeDeadExceptions(lines) {
+  const exceptions = [];
+  const parseNetLike = (line) => {
+    const body = line.startsWith('@@') ? line.slice(2) : line;
+    const i = body.lastIndexOf('$');
+    const opts = i < 0 ? [] : body.slice(i + 1).split(',');
+    if (opts.some((o) => {
+      const t = o.trim();
+      return SUPERSET_SKIP_OPTS.has(t) ||
+        (NET_TYPES.has(t) === false &&
+          t.startsWith('first-') === false &&
+          t.startsWith('third-') === false &&
+          t.startsWith('domain=') === false &&
+          t.startsWith('from=') === false &&
+          t !== '');
+    })) return null;
+    const s = parseSimpleRule(i < 0 ? body : body.slice(0, i));
+    if (s === null) return null;
+    const n = normNetOpts(opts);
+    if (n === null) return null;
+    return {
+      line,
+      h: s.host.toLowerCase(),
+      p: s.path.toLowerCase(),
+      types: n.types,
+      party: n.party,
+      scope: n.scope,
+    };
+  };
+
+  for (const line of lines) {
+    if (line.startsWith('@@') === false) continue;
+    if (line.includes('#')) continue;
+    const parsed = parseNetLike(line);
+    if (parsed !== null) exceptions.push(parsed);
+  }
+
+  const byExactHost = new Map();
+  const byCoverSuffix = new Map();
+  for (const line of lines) {
+    if (line.startsWith('@@') || line.includes('#')) continue;
+    const b = parseNetLike(line);
+    if (b === null) continue;
+    if (!byExactHost.has(b.h)) byExactHost.set(b.h, []);
+    byExactHost.get(b.h).push(b);
+    for (const sfx of netLabelSuffixes(b.h)) {
+      if (!byCoverSuffix.has(sfx)) byCoverSuffix.set(sfx, []);
+      byCoverSuffix.get(sfx).push(b);
+    }
+  }
+
+  const dead = [];
+  for (const e of exceptions) {
+    let reachable = false;
+    const sameHost = byExactHost.get(e.h);
+    if (sameHost !== undefined) {
+      for (const b of sameHost) {
+        if (netExceptionCovers(e, b)) {
+          reachable = true;
+          break;
+        }
+      }
+    }
+    if (reachable === false) {
+      for (const sfx of netLabelSuffixes(e.h)) {
+        const bucket = byCoverSuffix.get(sfx);
+        if (bucket === undefined) continue;
+        for (const b of bucket) {
+          if (b.h === e.h) continue;
+          if (netExceptionCovers(e, b)) {
+            reachable = true;
+            break;
+          }
+        }
+        if (reachable) break;
+      }
+    }
+    if (reachable === false) dead.push(e.line);
+  }
+
+  return { removed_lines: [...new Set(dead)].sort() };
 }
 
 // Exception coverage: same host-reach as a block cover, plus the exception's

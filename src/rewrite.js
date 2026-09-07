@@ -20,6 +20,14 @@
 //
 // `domain=`/`from=` and `to=` are deliberately left as written: they are in
 // common use in every spelling and are not part of this rename set.
+//
+// Two further strict-grammar normalizations ride on the same parse: a
+// pattern-less rule (`$domain=…`) is rewritten to the `*`-pattern spelling its
+// compiled unit already has, and the option tokens are sorted in a canonical
+// order with exact-duplicate tokens collapsed. Both are engine-equivalent
+// (SNFE compiles `$domain=` and `*$domain=` to one just-origin unit, treats the
+// option set as order-independent, and folds identical tokens) and they make
+// the shipped text byte-for-byte the strict grammar uBO stores.
 
 const CANONICAL = new Map([
   ['1p', 'first-party'],
@@ -37,6 +45,46 @@ const CANONICAL = new Map([
 ]);
 
 const COSMETIC_MARKERS = /##|#\?#|#@#/;
+
+// Canonical order for network option tokens (uBO treats the option set as
+// order-independent — SNFE registers `$1p,xmlhttprequest` and
+// `$xmlhttprequest,1p` as the same unit — so a fixed sorted order yields the
+// strict-grammar spelling for every rule and lets twins that differ only in
+// option order collapse in the dedup pass).
+function canonicalOptOrder(a, b) {
+  const prio = (t) => (t === 'domain' || t === 'from' ? 1 : t === 'important' || t === 'badfilter' ? 2 : 0);
+  const na = a.replace(/^~/, '');
+  const nb = b.replace(/^~/, '');
+  const ea = na.indexOf('=') === -1 ? na : na.slice(0, na.indexOf('='));
+  const eb = nb.indexOf('=') === -1 ? nb : nb.slice(0, nb.indexOf('='));
+  return prio(ea) - prio(eb) || ea.localeCompare(eb) || na.localeCompare(nb);
+}
+
+// Split a network option list on `,`, honoring backslash-escaped commas inside
+// option values. uBO's parser lets a `removeparam`/`redirect`/`replace` regex
+// carry an escaped `\,` (e.g. `$removeparam=/^__s=[A-Za-z0-9]{6\,}/`), so a
+// naive `split(',')` would cut the value mid-regex and reordering the shards
+// would corrupt the rule.
+function splitOptionTokens(s) {
+  const parts = [];
+  let cur = '';
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    if (ch === '\\' && i + 1 < s.length) {
+      cur += ch + s[i + 1];
+      i += 1;
+      continue;
+    }
+    if (ch === ',') {
+      parts.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  parts.push(cur);
+  return parts;
+}
 
 // Rewrite the network option tokens of a single filter line. Returns the input
 // unchanged unless at least one option token was renamed. Only the matched
@@ -56,13 +104,22 @@ export function canonicalizeNetOptions(line) {
     offset = 2;
     body = body.slice(2);
   }
-  const idx = body.lastIndexOf('$');
+  const idx = body.startsWith('$') ? 0 : body.lastIndexOf('$');
   if (idx === -1) return line;
-  const pattern = body.slice(0, idx);
+  let pattern = body.slice(0, idx);
   if (pattern.includes('#')) return line;
 
-  const parts = body.slice(idx + 1).split(',');
-  let changed = false;
+// A pattern-less rule (`$domain=example.com`) is engine-identical to its
+// `*`-pattern spelling (SNFE compiles both into the same just-origin unit,
+// and the engine is the authority the shipped file is verified against).
+// Normalizing to `*` gives every rule an explicit pattern. (The option
+// delimiter of a pattern-less rule is its leading `$` — a `$` inside a
+// `removeparam=`/`redirect=` regex value is literal and must not confuse it.)
+const patternChanged = pattern === '';
+  if (patternChanged) pattern = '*';
+
+  const parts = splitOptionTokens(body.slice(idx + 1));
+  let renamed = false;
   for (let i = 0; i < parts.length; i += 1) {
     const part = parts[i];
     let name = part;
@@ -71,13 +128,23 @@ export function canonicalizeNetOptions(line) {
     if (eq !== -1) name = name.slice(0, eq);
     const canon = CANONICAL.get(name);
     if (canon !== undefined && canon !== name) {
-      changed = true;
+      renamed = true;
       const neg = part.startsWith('~') ? '~' : '';
       parts[i] = neg + canon + (eq === -1 ? '' : part.slice(eq));
     }
   }
+
+  // Strict grammar: sort the option tokens in canonical order and collapse
+  // EXACT duplicate tokens only. SNFE folds identical type/party/repeated
+  // tokens into one mask and treats repeated `domain=`/`from=` as a union, so
+  // dropping a byte-identical token (or reordering any two tokens) never
+  // changes the compiled unit — but reordering alone lets spellings of the
+  // same rule that differ in option order deduplicate as one text line.
+  const sorted = [...new Set(parts)].sort(canonicalOptOrder);
+  const changed =
+    patternChanged || renamed || sorted.join(',') !== parts.join(',');
   if (!changed) return line;
-  return line.slice(0, offset) + pattern + '$' + parts.join(',');
+  return line.slice(0, offset) + pattern + '$' + sorted.join(',');
 }
 
 // Rewrite every network line in a merged rule set; returns the new lines and

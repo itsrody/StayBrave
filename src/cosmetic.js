@@ -816,6 +816,55 @@ function exceptionScopeCovers(eLoc, vLoc) {
   return tokenSetsCover(eLoc, vLoc, reg);
 }
 
+// ---------------------------------------------------------------------------
+// Dead cosmetic-exception candidates.
+//
+// uBO cosmetic exceptions withdraw the matching selector for the pages they
+// cover; a `#@#selector` whose selector appears in NO weak hide (`##`) of the
+// set therefore has nothing to withdraw — it can never affect delivery and is
+// inert engine weight. (Strong `#?#` hides are NOT withdrawn by a weak
+// exception — engine-verified — so they cannot keep an exception alive.)
+// Candidate-only: the cosmetic engine gate
+// (`certifyDeadCosmeticExceptions`) probes a delivery with the candidates
+// removed before any removal is committed.
+//
+// HTML filters (`##^…`), response-header filters (`##^responseheader`) and
+// scriptlet exceptions (`#@#+js(…)`) are opaque to the cosmetic engine and
+// never become candidates; hides are collected from both weak and strong
+// spellings so a strong hide keeps its same-selector exception alive.
+export function deadCosmeticExceptions(lines) {
+  const hides = new Set();
+  const exceptions = [];
+  for (const line of lines) {
+    const exc = line.indexOf('#@#');
+    if (exc !== -1) {
+      const selector = line.slice(exc + 3);
+      if (
+        selector === '' ||
+        selector.startsWith('^') ||
+        selector.startsWith('responseheader') ||
+        selector.startsWith('+js')
+      ) {
+        continue;
+      }
+      exceptions.push({ line, selector });
+      continue;
+    }
+    const weak = line.indexOf('##');
+    if (weak !== -1) {
+      const selector = line.slice(weak + 2);
+      if (selector.startsWith('^') || selector.startsWith('responseheader')) continue;
+      hides.add(selector);
+    }
+  }
+  return {
+    removed_lines: exceptions
+      .filter((e) => hides.has(e.selector) === false)
+      .map((e) => e.line)
+      .sort(),
+  };
+}
+
 export function plainBase(selector) {
   let base = selector;
   for (const op of BASE_STRIP_OPS) {

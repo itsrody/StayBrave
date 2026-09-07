@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { subsume, subsumeScoped, parseSimpleRule, countWildcardDomainRules, subsumeSuperset, subsumeDeadByException } from '../src/network.js';
+import { subsume, subsumeScoped, parseSimpleRule, countWildcardDomainRules, subsumeSuperset, subsumeDeadByException, subsumeDeadExceptions } from '../src/network.js';
 
 const run = (lines) => subsume(lines.map(String));
 
@@ -343,4 +343,53 @@ test('dead-by-exception: narrower typed exception never retires it (no candidate
     '@@||example.com^$script',
   ]);
   assert.deepEqual(removed_lines, []);
+});
+
+test('dead-exception: exception with no reachable block is a candidate', () => {
+  const { removed_lines } = subsumeDeadExceptions([
+    '||example.com^',
+    '@@||ghost-host.net^',
+  ]);
+  assert.deepEqual(removed_lines, ['@@||ghost-host.net^']);
+});
+
+test('dead-exception: exception that whitelists a block is not a candidate', () => {
+  const { removed_lines } = subsumeDeadExceptions([
+    '||example.com^',
+    '@@||example.com^',
+  ]);
+  assert.deepEqual(removed_lines, []);
+});
+
+test('dead-exception: pathless exception reaches a deeper host path block', () => {
+  const { removed_lines } = subsumeDeadExceptions([
+    '||sub.example.com/ads^',
+    '@@||example.com^',
+  ]);
+  assert.deepEqual(removed_lines, []);
+});
+
+test('dead-exception: path exception does not cover a pathless host block', () => {
+  const { removed_lines } = subsumeDeadExceptions([
+    '||example.com^',
+    '@@||example.com/ads^',
+  ]);
+  assert.deepEqual(removed_lines, ['@@||example.com/ads^']);
+});
+
+test('dead-exception: unparseable and negated rules are skipped', () => {
+  const { removed_lines } = subsumeDeadExceptions([
+    '||example.com^',
+    '/plain-begin/foo*',
+    '@@/plain-begin/foo*',
+    '@@||example.com^$domain=~news.com',
+  ]);
+  assert.deepEqual(removed_lines, []);
+});
+
+test('dead-exception: scoped exception dead on its own domain only', () => {
+  const { removed_lines } = subsumeDeadExceptions([
+    '@@||ads.example.com^$domain=news.com',
+  ]);
+  assert.deepEqual(removed_lines, ['@@||ads.example.com^$domain=news.com']);
 });

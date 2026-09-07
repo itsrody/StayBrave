@@ -86,19 +86,21 @@ export const Channel = {
 
 export function classifyNetwork(line) {
   const { pattern, opts } = splitOptions(line);
-  if (pattern === '') return Channel.NetworkCatchall;
-  if (pattern === '*') {
-    if (isJustOrigin(pattern, opts)) return Channel.NetworkJustOrigin;
+  // An empty pattern compiles to the same just-origin unit as `*` (SNFE
+  // normalizes pattern-less rules to `*`), so classify them together.
+  const effective = pattern === '' ? '*' : pattern;
+  if (effective === '*') {
+    if (isJustOrigin(effective, opts)) return Channel.NetworkJustOrigin;
     return Channel.NetworkCatchall;
   }
-  if (pattern.includes('#')) return Channel.NetworkCatchall;
+  if (effective.includes('#')) return Channel.NetworkCatchall;
   if (
-    (pattern.startsWith('|http://') || pattern.startsWith('|https://')) &&
-    isJustOrigin(pattern, opts)
+    (effective.startsWith('|http://') || effective.startsWith('|https://')) &&
+    isJustOrigin(effective, opts)
   ) {
     return Channel.NetworkJustOrigin;
   }
-  return hasDurableRun(pattern) ? Channel.NetworkTokened : Channel.NetworkCatchall;
+  return hasDurableRun(effective) ? Channel.NetworkTokened : Channel.NetworkCatchall;
 }
 
 function cosmeticChannel(line) {

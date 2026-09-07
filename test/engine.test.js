@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { removedProbe, verifyRemovedCoverage, certifySupersetRemovals } from '../src/engine.js';
-import { certifyCosmeticDeadHides } from '../src/cosmetic-engine.js';
+import { removedProbe, verifyRemovedCoverage, certifySupersetRemovals, certifyDeadExceptionRemovals } from '../src/engine.js';
+import { certifyCosmeticDeadHides, certifyDeadCosmeticExceptions } from '../src/cosmetic-engine.js';
 
 test('removedProbe derives a request for a plain host rule', () => {
   const p = removedProbe('||ads.example.com^');
@@ -137,4 +137,72 @@ test('certifyCosmeticDeadHides: hide still delivered is rejected', async () => {
   const all = ['example.com##.ad'];
   const certified = await certifyCosmeticDeadHides(['example.com##.ad'], all);
   assert.deepEqual(certified, []);
+});
+test('certifyDeadExceptionRemovals: exception with no surviving block is certified', async () => {
+  const survivors = ['||example.com^', '||isolated.net^'];
+  const { certified } = await certifyDeadExceptionRemovals(
+    ['@@||ghost-host.net^'],
+    survivors
+  );
+  assert.deepEqual(certified, ['@@||ghost-host.net^']);
+});
+
+test('certifyDeadExceptionRemovals: exception that unbinds a surviving block is rejected', async () => {
+  const survivors = ['||example.com^', '@@||example.com^'];
+  const { certified } = await certifyDeadExceptionRemovals(
+    ['@@||example.com^'],
+    survivors
+  );
+  assert.deepEqual(certified, []);
+});
+
+test('certifyDeadExceptionRemovals: scoped dead exception probes its own document', async () => {
+  // The exception only applies on news.com documents; no block binds it there,
+  // so removal changes nothing.
+  const survivors = ['||ads.example.com^', '@@||ads.news.com^$domain=news.com'];
+  const { certified } = await certifyDeadExceptionRemovals(
+    ['@@||ads.news.com^$domain=news.com'],
+    survivors
+  );
+  assert.deepEqual(certified, ['@@||ads.news.com^$domain=news.com']);
+});
+
+test('certifyDeadExceptionRemovals: a candidate must not certify itself', async () => {
+  // Without the other block, the only thing `@@||x.com^` could whitelist is
+  // itself; with candidates excluded from the probe set it must be rejected.
+  const survivors = ['||x.com^', '@@||sub.x.com^'];
+  const { certified } = await certifyDeadExceptionRemovals(
+    ['@@||sub.x.com^'],
+    survivors
+  );
+  assert.deepEqual(certified, []);
+});
+
+test('certifyDeadCosmeticExceptions: selector-less exception is certified', async () => {
+  const all = ['example.com##.ad', 'example.com#@#.ghost'];
+  const certified = await certifyDeadCosmeticExceptions(
+    ['example.com#@#.ghost'],
+    all
+  );
+  assert.deepEqual(certified, ['example.com#@#.ghost']);
+});
+
+test('certifyDeadCosmeticExceptions: exception with a live hide is rejected', async () => {
+  const all = ['example.com##.ad', 'example.com#@#.ad'];
+  const certified = await certifyDeadCosmeticExceptions(
+    ['example.com#@#.ad'],
+    all
+  );
+  assert.deepEqual(certified, []);
+});
+
+test('certifyDeadCosmeticExceptions: weak exception is inert against a strong hide and is certified', async () => {
+  // Engine-verified: `#?#` strong hides are not withdrawn by a weak `#@#`
+  // exception, so the exception can never affect delivery.
+  const all = ['example.com#?#.ad'];
+  const certified = await certifyDeadCosmeticExceptions(
+    ['example.com#@#.ad'],
+    all
+  );
+  assert.deepEqual(certified, ['example.com#@#.ad']);
 });

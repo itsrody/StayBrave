@@ -36,8 +36,10 @@ export function defaults() {
       rewrite_canonical_options: true,
       network_superset_subsumption: true,
       network_dead_by_exception: true,
+      network_dead_exception: true,
       cosmetic_engine_filter: true,
       cosmetic_dead_hide_by_exception: true,
+      cosmetic_dead_exception: true,
       cosmetic_cost: {
         split_comma_lists: false,
         subsume_selectors: true,

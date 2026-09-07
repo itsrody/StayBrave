@@ -68,12 +68,22 @@ export function writeOutput(path, outputCfg, optimized, summaries) {
       `! Cosmetic dead-hide gate (engine-certified removals): ${optimized.cosmetic_dead_removed ?? 0} removed of ${optimized.cosmetic_dead_candidates_count} candidate(s) with their hide already withdrawn by an exception`
     );
   }
+  if ((optimized.cosmetic_dead_exception_candidates_count ?? 0) > 0) {
+    chunks.push(
+      `! Cosmetic dead-exception gate (engine-certified removals): ${optimized.cosmetic_dead_exception_removed ?? 0} removed of ${optimized.cosmetic_dead_exception_candidates_count} candidate(s) whose selector no hide uses`
+    );
+  }
   chunks.push(
     `! Wildcard-TLD $domain rules (kept to avoid broadening): ${optimized.wildcard_domain_rules}`
   );
   if ((optimized.superset_candidates ?? 0) > 0) {
     chunks.push(
       `! Superset gate (engine-certified removals): ${optimized.superset_removed ?? 0} removed of ${optimized.superset_candidates} candidate(s) probed through uBO's own static network engine`
+    );
+  }
+  if ((optimized.engine_dead_exception_candidates_count ?? 0) > 0) {
+    chunks.push(
+      `! Dead-exception gate (engine-certified removals): ${optimized.engine_dead_exception_removed ?? 0} removed of ${optimized.engine_dead_exception_candidates_count} candidate(s) that uBO proves suppress no surviving block`
     );
   }
   const tb = optimized.token_buckets ?? {};

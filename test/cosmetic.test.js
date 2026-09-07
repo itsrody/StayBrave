@@ -11,6 +11,7 @@ import {
   Channel,
   firstClassIdToken,
   deadHidesByException,
+  deadCosmeticExceptions,
 } from '../src/cosmetic.js';
 
 test('splitCosmetic handles hide/unhide/html/strong', () => {
@@ -231,4 +232,44 @@ test('unrelated selectors stay untouched', () => {
     'example.com#@#.banner',
   ]);
   assert.deepEqual(removed_lines, []);
+});
+test('dead-cosmetic-exception: selector matching no hide is a candidate', () => {
+  const { removed_lines } = deadCosmeticExceptions([
+    'example.com##.ad',
+    'example.com#@#.ghost',
+  ]);
+  assert.deepEqual(removed_lines, ['example.com#@#.ghost']);
+});
+
+test('dead-cosmetic-exception: selector matching a hide is not a candidate', () => {
+  const { removed_lines } = deadCosmeticExceptions([
+    'example.com##.ad',
+    'example.com#@#.ad',
+  ]);
+  assert.deepEqual(removed_lines, []);
+});
+
+test('dead-cosmetic-exception: weak exception ignores strong hides entirely', () => {
+  // Engine-verified: `#?#` strong hides are never withdrawn by weak `#@#`.
+  const { removed_lines } = deadCosmeticExceptions([
+    'example.com#?#.ad',
+    'example.com#@#.ad',
+  ]);
+  assert.deepEqual(removed_lines, ['example.com#@#.ad']);
+});
+
+test('dead-cosmetic-exception: html/responseheader/scriptlet exceptions are skipped', () => {
+  const { removed_lines } = deadCosmeticExceptions([
+    'example.com#@#^script:has-text(adsOut)',
+    'example.com#@#^responseheader(x-location)',
+    'example.com#@#+js(noop.js)',
+  ]);
+  assert.deepEqual(removed_lines, []);
+});
+
+test('dead-cosmetic-exception: id selector exception is a candidate when no id hide exists', () => {
+  const { removed_lines } = deadCosmeticExceptions([
+    'example.com#@##no-such-id',
+  ]);
+  assert.deepEqual(removed_lines, ['example.com#@##no-such-id']);
 });
