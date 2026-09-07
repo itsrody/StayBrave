@@ -10,6 +10,7 @@ import {
   classifyChannel,
   Channel,
   firstClassIdToken,
+  deadHidesByException,
 } from '../src/cosmetic.js';
 
 test('splitCosmetic handles hide/unhide/html/strong', () => {
@@ -175,4 +176,59 @@ test('firstClassIdToken', () => {
   assert.equal(firstClassIdToken('.ad-x div'), '.ad-x');
   assert.equal(firstClassIdToken('#ad'), '#ad');
   assert.equal(firstClassIdToken('div.ad'), undefined);
+});
+
+test('A: equal-scope exception kills the same-selector hide (candidate)', () => {
+  const { removed_lines } = deadHidesByException([
+    'example.com##.ad',
+    'example.com#@#.ad',
+  ]);
+  assert.deepEqual(removed_lines, ['example.com##.ad']);
+});
+
+test('A: broader host exception kills subdomain hide (candidate)', () => {
+  const { removed_lines } = deadHidesByException([
+    'sub.example.com##.ad',
+    'example.com#@#.ad',
+  ]);
+  assert.deepEqual(removed_lines, ['sub.example.com##.ad']);
+});
+
+test('C: generic exception kills host-scoped hide (candidate)', () => {
+  const { removed_lines } = deadHidesByException(['example.com##.ad', '#@#.ad']);
+  assert.deepEqual(removed_lines, ['example.com##.ad']);
+});
+
+test('narrower exception never kills a broader hide (no candidate)', () => {
+  const { removed_lines } = deadHidesByException([
+    'example.com##.ad',
+    'sub.example.com#@#.ad',
+  ]);
+  assert.deepEqual(removed_lines, []);
+});
+
+test('host exception never kills a generic hide (no candidate)', () => {
+  const { removed_lines } = deadHidesByException(['##.ad', 'example.com#@#.ad']);
+  assert.deepEqual(removed_lines, []);
+});
+
+test('generic exceptions cancel each other out of the candidate set', () => {
+  const { removed_lines } = deadHidesByException(['##.ad', '#@#.ad', '##.banner']);
+  assert.deepEqual(removed_lines, ['##.ad']);
+});
+
+test('procedural hides are not candidates', () => {
+  const { removed_lines } = deadHidesByException([
+    'example.com##.ad:has-text(x)',
+    'example.com#@#.ad:has-text(x)',
+  ]);
+  assert.deepEqual(removed_lines, []);
+});
+
+test('unrelated selectors stay untouched', () => {
+  const { removed_lines } = deadHidesByException([
+    'example.com##.ad',
+    'example.com#@#.banner',
+  ]);
+  assert.deepEqual(removed_lines, []);
 });

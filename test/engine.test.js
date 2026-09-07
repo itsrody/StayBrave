@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { removedProbe, verifyRemovedCoverage } from '../src/engine.js';
+import { removedProbe, verifyRemovedCoverage, certifySupersetRemovals } from '../src/engine.js';
+import { certifyCosmeticDeadHides } from '../src/cosmetic-engine.js';
 
 test('removedProbe derives a request for a plain host rule', () => {
   const p = removedProbe('||ads.example.com^');
@@ -77,4 +78,63 @@ test('verifyRemovedCoverage: subsumable-option removal still covered', async () 
   );
   assert.equal(result.holes.length, 0);
   assert.equal(result.verified, 1);
+});
+
+test('certifySupersetRemovals: covered child is certified for removal', async () => {
+  const survivors = ['||example.com^', '||sub.example.com^'];
+  const { certified, candidates } = await certifySupersetRemovals(
+    ['||sub.example.com^'],
+    survivors
+  );
+  assert.deepEqual(certified, ['||sub.example.com^']);
+  assert.deepEqual(candidates, ['||sub.example.com^']);
+});
+
+test('certifySupersetRemovals: uncovered candidate is rejected', async () => {
+  const survivors = ['||example.com^', '||isolated.net^'];
+  const { certified } = await certifySupersetRemovals(
+    ['||isolated.net^'],
+    survivors
+  );
+  assert.deepEqual(certified, []);
+});
+
+test('certifySupersetRemovals: dead-by-exception candidate certifies as unblocked', async () => {
+  const survivors = ['||example.com^', '||ads.example.com^', '@@||ads.example.com^'];
+  const { certified } = await certifySupersetRemovals(
+    ['||ads.example.com^'],
+    survivors,
+    ['||ads.example.com^']
+  );
+  assert.deepEqual(certified, ['||ads.example.com^']);
+});
+
+test('certifySupersetRemovals: scoped victim probed at its own domain', async () => {
+  const survivors = [
+    '||news.com^$domain=news.com',
+    '||ads.news.com^$domain=news.com',
+  ];
+  const { certified } = await certifySupersetRemovals(
+    ['||ads.news.com^$domain=news.com'],
+    survivors
+  );
+  assert.deepEqual(certified, ['||ads.news.com^$domain=news.com']);
+});
+
+test('certifyCosmeticDeadHides: equal-scope exception certificates the hide', async () => {
+  const all = ['example.com##.ad', 'example.com#@#.ad'];
+  const certified = await certifyCosmeticDeadHides(['example.com##.ad'], all);
+  assert.deepEqual(certified, ['example.com##.ad']);
+});
+
+test('certifyCosmeticDeadHides: generic exception certificates host hide', async () => {
+  const all = ['example.com##.ad', '#@#.ad'];
+  const certified = await certifyCosmeticDeadHides(['example.com##.ad'], all);
+  assert.deepEqual(certified, ['example.com##.ad']);
+});
+
+test('certifyCosmeticDeadHides: hide still delivered is rejected', async () => {
+  const all = ['example.com##.ad'];
+  const certified = await certifyCosmeticDeadHides(['example.com##.ad'], all);
+  assert.deepEqual(certified, []);
 });

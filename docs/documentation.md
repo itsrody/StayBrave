@@ -81,9 +81,9 @@ lists.json ──▶ Fetch ──▶ Preprocess ──▶ Normalize ──▶ An
 | Preprocess | `src/preprocess.js` | Evaluates uBO preparser directives (`!#if` / `!#else` / `!#endif`) against the desktop-Firefox token environment and resolves `!#include`. |
 | Normalize | `src/normalize.js` | Translates cross-family syntax: hosts files to `||domain^`, strips hosting IP comments, drops `localhost` aliases, canonicalizes uBO/ABP redirect resource aliases. uBO-native `$empty`/`$mp4` pass through unchanged. |
 | Analyze | `src/ubo.js` + `src/analyze.js` | Parses every line with uBO's own `AstFilterParser` (`trustedSource:false`, exactly like uBO 1.74+) and classifies results into statistics. Applies the cosmetic preprocessing uBO itself performs (dead-operator detection, procedural rewrite). |
-| Optimize | `src/optimize.js` + `src/network.js` + `src/cosmetic.js` + `src/rewrite.js` + `src/efficiency.js` | Canonicalizes net-option spellings, removes exact duplicates, sorts deterministically, applies provable network + cosmetic subsumption passes, and reports SNFE-mirrored token-bucket + A–F efficiency grades. |
+| Optimize | `src/optimize.js` + `src/network.js` + `src/cosmetic.js` + `src/rewrite.js` + `src/efficiency.js` | Canonicalizes net-option spellings, removes exact duplicates, sorts deterministically, applies provable network + cosmetic subsumption passes, emits engine-gated superset/dead-rule candidates, and reports SNFE-mirrored token-bucket + A–F efficiency grades. |
 | Cosmetics | `src/cosmetic-engine.js` + `vendor/ubo/` | Runs every `##`/`#@#` rule through uBO's vendored `CosmeticFilteringEngine` (identical parser + writer/reader) and removes the rules stock uBO drops at load — the generic procedural filters that `allowGenericProceduralFilters:false` discards. `filter.cosmetic_engine_filter` gates the pass (default on). |
-| Recheck | `src/engine.js` | Compiles the survivors through uBO's `StaticNetFilteringEngine` and certifies that nothing the Optimize passes removed still needs to block — any coverage hole aborts the build. |
+| Recheck | `src/engine.js` + `src/cosmetic-engine.js` | Gates the superset/dead-rule candidates through uBO's own static network + cosmetic engines (only engine-certified removals ship), then compiles the survivors and certifies that nothing Optimize passed removed still needs to block — any coverage hole aborts the build. |
 | Write | `src/writer.js` | Emits `output/StayBrave-Classic.txt` with a full provenance/statistics header. |
 | Config | `src/config.js` | Validates `lists.json`, merges defaults. |
 
@@ -197,9 +197,23 @@ node src/main.js --help
     (synonym options resolve to the same node type), lets alias-spelled twins
     collapse into one rule, and makes scoped subsumption see the exact spelling
     uBO's engine stores. Counted in the header as `Rewrites`.
+  - `network_superset_subsumption` (default `true`) — emit *candidate* superset
+    (broader host/path/type/scope block) removals. Nothing is removed on the
+    predicate's word alone: every candidate is probed through uBO's own
+    `StaticNetFilteringEngine` and only certifiable removals are shipped (see
+    the engine gates below). Also gates the dead-by-exception network pass when
+    `network_dead_by_exception` is `true`.
+  - `network_dead_by_exception` (default `true`) — emit *candidate* network
+    dead-block removals: a block whose requests an exception already unbinds
+    across its whole scope. Engine-certified before removal.
   - `cosmetic_engine_filter` (default `true`) — run the merged rules through
     uBO's vendored cosmetic engine and drop the generic procedural filters
     stock uBO discards at load (see 5c).
+  - `cosmetic_dead_hide_by_exception` (default `true`) — emit *candidate*
+    cosmetic A/C dead-hide removals: a same-selector non-procedural hide whose
+    selector an exception already withdraws across its whole scope (equal,
+    broader-host, or generic exception). Engine-delivery-certified before
+    removal.
   - `cosmetic_cost` — independent toggles for the cosmetic passes
     (`split_comma_lists` default off — pure-CSS comma lists are canonicalized
     to grouped form instead of split; `subsume_selectors`, `subsume_procedural`
@@ -351,6 +365,26 @@ After exact-string dedup and deterministic sort:
   `subsume_procedural` removes a procedural rule covered by a plain rule on the
   same `plainBase` selector or an identical procedural selector on a strictly
   broader scope.
+- **Superset subsumption (candidate-only, engine-gated)** — a block `v` is a
+  *candidate* for removal when a broader surviving block provably covers its
+  requests: equal or label-suffix host that spans all of `v`'s paths (an
+  optionless suffix cover must span every path; a same-host path-prefix cover
+  suffices), a type mask `⊇ v`'s (an optionless `||host^` is the
+  `OPTIONLESS_TYPES` mask — it does **not** cover `$document`/`$popup`, so those
+  victims are never candidates), matching party, and a domain scope `⊇ v`'s (a
+  bare rule covers all documents; a `domain=`-scoped survivor never covers an
+  unscoped victim). The predicate also produces **dead-by-exception** network
+  candidates: a block whose requests an exception already unbinds across its
+  whole scope. These passes are deliberately permissive and never remove on the
+  predicate's word alone — everything routes through the engine gates below.
+- **Cosmetic A/C dead hides (candidate-only, engine-gated)** — a same-selector
+  non-procedural hide is a *candidate* when an exception withdraws that selector
+  across its whole scope: an equal scope (`a.com#@#.ad` kills `a.com##.ad`), a
+  broader-host scope (`a.com#@#.ad` kills `sub.a.com##.ad`), or a generic
+  exception (`#@#.ad` kills `a.com##.ad`, engine-verified that cosmetic
+  exceptions cancel host-scoped hides). A narrower exception never kills a
+  broader or generic hide. Delivery changes are certified by the cosmetic engine
+  gate before any removal.
 - **Diagnostics** — `channelCounts` bins cosmetic rules into uBO's delivery
   channels (simple class/id, complex token-led, generic-misc, hostname-hide,
   hostname-unhide, procedural); `tokenBucketEstimate` estimates uBO's network
@@ -370,6 +404,37 @@ aborts); still not blocked means an exception such as `@@||host^` legitimately
 cancelled it and the removal is safe. A bounded sample (default 2000, spread
 evenly across the removed set) is verified every build — a pass-bug can no
 longer silently ship a coverage gap.
+
+### 5aa. Superset / dead-rule engine gates (the source of truth)
+
+The superset and dead-rule candidates above are over-approximations: uBO's
+`domain=` scope and party masking interact in ways a host-suffix predicate
+cannot fully predict (the engine oracle has caught genuine holes). Nothing is
+removed on the predicate's word alone. Two gates make the shipped removals
+*provable-by-construction*:
+
+- **Network gate** (`certifySupersetRemovals`): every candidate is probed
+  through `StaticNetFilteringEngine` against the survivor set **with all
+  candidate rules removed** (so a candidate can never certify itself; the view
+  is unchanged for genuinely covered removals, since the cover relation is
+  acyclic and a covered request stays blocked by the chain's non-candidate
+  maximum). Superset candidates must remain **blocked**; dead-by-exception
+  candidates must remain **unblocked** (the exception still unbinds them). A
+  `domain=`-scoped victim is probed at its own document hosts, in addition to
+  a synthetic third-party origin, so the scope a removal would affect is the
+  scope that is exercised. Only candidates certified on every relevant origin
+  are removed.
+- **Cosmetic gate** (`certifyCosmeticDeadHides`): each A/C candidate hide's
+  selector must be absent from uBO's vendored cosmetic engine retrieval
+  (`retrieveSpecificSelectors`) at every positive host of the hide's scope —
+  proving the exception already withholds it, so removing the rule cannot
+  change delivered cosmetic filtering.
+
+Both gates run in the pipeline (recording `superset_candidates` /
+`superset_removed` / `cosmetic_dead_candidates_count` /
+`cosmetic_dead_removed` in the output header) before the recheck below; the
+certified network removals are folded back into the set `verifyRemovedCoverage`
+samples, so nothing engine-certified can bypass the existing coverage gate.
 
 ### 5b. Provided-list subtraction (`src/provided.js`)
 

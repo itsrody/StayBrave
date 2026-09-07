@@ -93,9 +93,19 @@ try {
   console.log(
     `network subsumed: ${fmt(o.network_subsumed)} | scoped subsumed: ${fmt(o.scoped_subsumed)} | cosmetic subsumed: ${fmt(o.cosmetic_selectors_subsumed)} | procedural subsumed: ${fmt(o.procedural_subsumed)}`
   );
+  if (o.superset_candidates > 0) {
+    console.log(
+      `superset gate: ${fmt(o.superset_candidates)} candidate(s) probed through uBO's engine, ${fmt(o.superset_removed)} certified & removed (${fmt(o.superset_candidates - o.superset_removed)} rejected as uncovered)`
+    );
+  }
   if (o.cosmetic_engine_dropped > 0) {
     console.log(
       `cosmetic engine: ${fmt(o.cosmetic_engine_dropped)} dead rule(s) dropped (stock uBO would ignore them)`
+    );
+  }
+  if (o.cosmetic_dead_candidates_count > 0) {
+    console.log(
+      `cosmetic dead-hide gate: ${fmt(o.cosmetic_dead_candidates_count)} candidate(s), ${fmt(o.cosmetic_dead_removed)} certified exception-withdrawn & removed`
     );
   }
   if (o.canonicalized_rules > 0) {

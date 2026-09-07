@@ -9,8 +9,8 @@
 // must survive the passes below, so post-optimization counts are tallied and
 // surfaced in the writer header / CLI as a first-class metric.
 
-import { subsume, subsumeScoped, tokenBucketEstimate, countWildcardDomainRules } from './network.js';
-import { subsumeSelectors, subsumeProcedural, channelCounts } from './cosmetic.js';
+import { subsume, subsumeScoped, tokenBucketEstimate, countWildcardDomainRules, subsumeSuperset, subsumeDeadByException } from './network.js';
+import { subsumeSelectors, subsumeProcedural, channelCounts, deadHidesByException } from './cosmetic.js';
 import { canonicalizeRules } from './rewrite.js';
 import { analyzeEfficiency } from './efficiency.js';
 
@@ -104,6 +104,30 @@ export function optimize(rules, filter) {
     proceduralSubsumed = n;
   }
 
+  // Candidate superset / dead-block network removals. These are NOT committed
+  // here: they carry the risk of over-approximation on domain=/party masking,
+  // so the pipeline's engine gate (`certifySupersetRemovals` in lib.js) probes
+  // every candidate and only certifies those whose removal preserves the
+  // request outcome (superset: still blocked; dead-by-exception: still
+  // unblocked by the survivor exception).
+  let supersetCandidates = [];
+  let deadByExceptionCandidates = [];
+  if (filter.network_optimize && filter.network_superset_subsumption !== false) {
+    supersetCandidates = subsumeSuperset(active).removed_lines;
+    if (filter.network_dead_by_exception !== false) {
+      deadByExceptionCandidates = subsumeDeadByException(active).removed_lines;
+    }
+  }
+
+  // Cosmetic A/C dead-hide candidates (exception already withdraws the hide's
+  // selector across its whole scope). Candidate-only; the cosmetic engine gate
+  // (`certifyCosmeticDeadHides` in cosmetic-engine.js) certifies delivery is
+  // preserved before the pipeline removes anything.
+  let cosmeticDeadCandidates = [];
+  if (filter.cosmetic_dead_hide_by_exception !== false) {
+    cosmeticDeadCandidates = deadHidesByException(active).removed_lines;
+  }
+
   const channels = channelCounts(active);
   const [tokened, justOrigin, catchAll] = tokenBucketEstimate(active);
   const wildcardDomainRules = countWildcardDomainRules(active);
@@ -122,6 +146,9 @@ export function optimize(rules, filter) {
     scoped_subsumed: scopedSubsumed,
     removed_network: removedNetwork,
     pre_opt_lines: unique,
+    engine_superset_candidates: supersetCandidates,
+    engine_dead_candidates: deadByExceptionCandidates,
+    cosmetic_dead_candidates: cosmeticDeadCandidates,
     wildcard_domain_rules: wildcardDomainRules,
     token_buckets: { tokened, justOrigin, catchAll },
     hostname_tokened: tokened,

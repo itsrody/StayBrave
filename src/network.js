@@ -222,6 +222,23 @@ export function subsumeScoped(lines) {
   return [kept, removed, removedLines];
 }
 
+// uBO's optionless network mask (from SNFE defaults): document/popup/webrtc
+// are NOT covered by a bare `||host^` — they need their explicit options.
+export const OPTIONLESS_TYPES = new Set([
+  'subdocument',
+  'script',
+  'image',
+  'stylesheet',
+  'object',
+  'object-subrequest',
+  'media',
+  'xmlhttprequest',
+  'font',
+  'ping',
+  'websocket',
+  'other',
+]);
+
 // Approximate distribution across uBO's token buckets (diagnostics only),
 // mirroring `StaticNetFilteringEngine.freeze`: each network rule is stored
 // under the token derived from its pattern (`FilterCompiler.makeToken`), which
@@ -295,4 +312,350 @@ function patternIncludesDurableRun(pattern) {
     if (bef !== '*' && aft !== '*') return true;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Superset block subsumption (candidate only — ENGINE-CERTIFIED by the caller).
+//
+// A block `v` (host/path + type masks + party + domain scope) is a *candidate*
+// for removal when a surviving block `c` provably covers the same requests:
+//
+//   * host: `c` host is an equal/label-suffix of `v`'s and spans the same path
+//     (an optionless suffix cover must span all of `v`'s paths; on the same
+//     host a path-prefix cover suffices); and
+//   * types: `c` type mask ⊇ `v` type mask, where an optionless `||host^` is
+//     the OPTIONLESS_TYPES mask (it does not cover document/popup, so a
+//     `$document`/`$popup` victim is never covered by an optionless survivor);
+//   * party: `c` is `both` or equals `v`'s single party, and
+//   * scope: `c`'s domain scope ⊇ `v`'s, and `c` must be truly scope-covering
+//     (a bare `||host^` covers all documents, a `domain=`-scoped survivor does
+//     not cover an unscoped victim).
+//
+// This pass is deliberately PERMISSIVE (it may over-report): the pipeline's
+// engine-recheck probes every candidate against the survivor set and only the
+// subset the engine *certifies still blocks* is actually removed. That makes
+// the shipped removals provable-by-construction instead of trusting this
+// predicate, which the engine oracle has shown to over-approximate on
+// domain=-scoped / party-masked interactions.
+const NET_TYPES = new Set([
+  'script',
+  'image',
+  'stylesheet',
+  'object',
+  'object-subrequest',
+  'media',
+  'subdocument',
+  'ping',
+  'xmlhttprequest',
+  'xhr',
+  'websocket',
+  'font',
+  'other',
+  'document',
+  'popup',
+]);
+const SUPERSET_SKIP_OPTS = new Set([
+  'important',
+  'redirect',
+  'redirect-rule',
+  'csp',
+  'removeparam',
+  'urlskip',
+  'uritransform',
+  'replace',
+  'denyallow',
+  'generichide',
+  'badfilter',
+  'all',
+  'cname',
+  'ipaddress',
+]);
+
+function normNetOpts(opts) {
+  const types = [];
+  let party = 'both';
+  let scope = null; // array of lowered domains when domain=/from= present
+  for (const o0 of opts) {
+    const o = o0.trim();
+    if (o === '') continue;
+    if (NET_TYPES.has(o)) {
+      types.push(o === 'xhr' ? 'xmlhttprequest' : o);
+      continue;
+    }
+    if (o === 'first-party') {
+      party = party === 'third-party' ? 'both' : 'first-party';
+      continue;
+    }
+    if (o === 'third-party') {
+      party = party === 'first-party' ? 'both' : 'third-party';
+      continue;
+    }
+    if (o.startsWith('~')) return null;
+    if (o.startsWith('domain=') || o.startsWith('from=')) {
+      const v = o.slice(o.indexOf('=') + 1);
+      if (v.includes('~')) return null;
+      const toks = v
+        .split('|')
+        .map((t) => t.trim().toLowerCase())
+        .filter((t) => t !== '');
+      if (toks.length === 0) continue;
+      scope = scope === null ? toks : scope.concat(toks);
+      continue;
+    }
+    return null;
+  }
+  let typesUnique = [...new Set(types)].sort();
+  if (typesUnique.includes('xmlhttprequest') && typesUnique.includes('xhr')) {
+    typesUnique = typesUnique.filter((t) => t !== 'xhr');
+  }
+  return {
+    types: typesUnique,
+    party,
+    scope: scope === null ? null : [...new Set(scope)].sort(),
+  };
+}
+
+function netTypeMask(n) {
+  return n.types.length === 0 ? OPTIONLESS_TYPES : new Set(n.types);
+}
+
+function netPathCovers(pa, pb) {
+  return pa === '' || pb === pa || pb.startsWith(`${pa}/`);
+}
+
+function netHostCovers(a, b) {
+  // a covers b when equal host with path-prefix, or a is a label-suffix host
+  // that spans all of b's paths (any path on the suffixed host).
+  if (a.h === b.h) {
+    return b.p === '' ? a.p === '' : a.p === '' || netPathCovers(a.p, b.p);
+  }
+  if (b.h.length <= a.h.length) return false;
+  if (!b.h.endsWith(a.h)) return false;
+  if (b.h[b.h.length - a.h.length - 1] !== '.') return false;
+  return a.p === '';
+}
+
+// Strict superset (the victim is genuinely implied — never identical).
+function netCovers(c, v) {
+  if (!netHostCovers(c, v)) return false;
+  const mc = netTypeMask(c);
+  const mv = netTypeMask(v);
+  for (const t of mv) if (!mc.has(t)) return false;
+  if (c.party !== 'both' && c.party !== v.party) return false;
+  if (c.scope === null) {
+    // survivor applies on all documents: covers any narrower scope.
+  } else if (v.scope === null) {
+    return false; // victim on all documents, survivor only some
+  } else {
+    // survivor must block on every document the victim does.
+    const cs = new Set(c.scope);
+    if (!v.scope.every((t) => cs.has(t))) return false;
+  }
+  // require strict difference somewhere
+  const sameTypes = c.types.length === v.types.length &&
+    c.types.every((t) => v.types.includes(t));
+  const sameHost = c.h === v.h && c.p === v.p;
+  const sameParty = c.party === v.party;
+  const sameScope = c.scope === null ? v.scope === null : c.scope.join('|') === v.scope.join('|');
+  return !(sameHost && sameTypes && sameParty && sameScope);
+}
+
+function isSupersetEligibleLine(line) {
+  if (line.startsWith('@@')) return null;
+  const i = line.lastIndexOf('$');
+  const pattern = i < 0 ? line : line.slice(0, i);
+  const opts = i < 0 ? [] : line.slice(i + 1).split(',');
+  if (opts.some((o) => {
+    const t = o.trim();
+    return SUPERSET_SKIP_OPTS.has(t) ||
+      (NET_TYPES.has(t) === false &&
+        t.startsWith('first-') === false &&
+        t.startsWith('third-') === false &&
+        t.startsWith('domain=') === false &&
+        t.startsWith('from=') === false &&
+        t !== '');
+  })) return null;
+  const s = parseSimpleRule(pattern);
+  if (s === null) return null;
+  const n = normNetOpts(opts);
+  if (n === null) return null;
+  return {
+    line,
+    h: s.host.toLowerCase(),
+    p: s.path.toLowerCase(),
+    types: n.types,
+    party: n.party,
+    scope: n.scope,
+  };
+}
+
+function netLabelSuffixes(host) {
+  const out = [];
+  let h = host;
+  while (true) {
+    out.push(h);
+    const i = h.indexOf('.');
+    if (i === -1) break;
+    h = h.slice(i + 1);
+    if (!h.includes('.')) break; // stop before a bare public-suffix bucket
+  }
+  return out;
+}
+
+// Returns [candidateRemovals(as lines), affectedBlocks] — the caller gates the
+// candidate list through the engine before removing anything.
+export function subsumeSuperset(lines) {
+  // Two indexes keep this tractable:
+  //   * exact-host buckets (equal-host path-prefix covers), and
+  //   * suffix buckets holding ONLY empty-path rules (a suffix cover must span
+  //     all of the victim's paths), keyed by the victim's own later labels so
+  //     bare public-suffix buckets never blow up.
+  const byExactHost = new Map();
+  const byCoverSuffix = new Map();
+  const parsed = [];
+  let skipped = 0;
+
+  for (const line of lines) {
+    const p = isSupersetEligibleLine(line);
+    if (p === null) {
+      skipped += 1;
+      continue;
+    }
+    parsed.push(p);
+    if (!byExactHost.has(p.h)) byExactHost.set(p.h, []);
+    byExactHost.get(p.h).push(p);
+    if (p.p === '') {
+      for (const sfx of netLabelSuffixes(p.h)) {
+        if (!byCoverSuffix.has(sfx)) byCoverSuffix.set(sfx, []);
+        byCoverSuffix.get(sfx).push(p);
+      }
+    }
+  }
+
+  const candidate = new Set();
+  for (const victim of parsed) {
+    // (1) equal-host covers: a same-host rule with path='' or a path-prefix
+    // precedes the victim's path.
+    const sameHost = byExactHost.get(victim.h);
+    if (sameHost !== undefined) {
+      for (const cover of sameHost) {
+        if (cover.line === victim.line) continue;
+        if (netCovers(cover, victim)) {
+          candidate.add(victim.line);
+          break;
+        }
+      }
+    }
+    if (candidate.has(victim.line)) continue;
+
+    // (2) suffix covers: only empty-path covers reach a victim whose own host
+    // is deeper, so scan the victim's label suffixes.
+    const suffixes = netLabelSuffixes(victim.h);
+    for (const sfx of suffixes) {
+      const bucket = byCoverSuffix.get(sfx);
+      if (bucket === undefined) continue;
+      for (const cover of bucket) {
+        if (cover.h === victim.h) continue; // handled in (1)
+        if (netCovers(cover, victim)) {
+          candidate.add(victim.line);
+          break;
+        }
+      }
+      if (candidate.has(victim.line)) break;
+    }
+  }
+
+  return {
+    removed_lines: [...candidate].sort(),
+    parsed_count: parsed.length,
+    skipped_count: skipped,
+  };
+}
+
+// Dead-block candidates: a block whose requests an exception already unbinds
+// across every document where the block applies. Candidate-only for the same
+// engine-certification gate. An exception covers `v` when it shares the exact
+// host (or a label-suffix host spanning all paths), matches every type of `v`,
+// matches `v`'s party, and its scope ⊇ `v`'s scope (an unscoped exception
+// covers anything). Only `||`-shaped simple blocks are considered.
+export function subsumeDeadByException(lines) {
+  const blocks = [];
+  const exceptions = [];
+  for (const line of lines) {
+    const isExc = line.startsWith('@@');
+    const body = isExc ? line.slice(2) : line;
+    const i = body.lastIndexOf('$');
+    const pattern = i < 0 ? body : body.slice(0, i);
+    const opts = i < 0 ? [] : body.slice(i + 1).split(',');
+    if (opts.some((o) => {
+      const t = o.trim();
+      return SUPERSET_SKIP_OPTS.has(t) ||
+        (NET_TYPES.has(t) === false &&
+          t.startsWith('first-') === false &&
+          t.startsWith('third-') === false &&
+          t.startsWith('domain=') === false &&
+          t.startsWith('from=') === false &&
+          t !== '');
+    })) continue;
+    const s = parseSimpleRule(pattern);
+    if (s === null) continue;
+    const n = normNetOpts(opts);
+    if (n === null) continue;
+    (isExc ? exceptions : blocks).push({
+      line,
+      h: s.host.toLowerCase(),
+      p: s.path.toLowerCase(),
+      types: n.types,
+      party: n.party,
+      scope: n.scope,
+    });
+  }
+
+  const candidate = new Set();
+  for (const b of blocks) {
+    for (const e of exceptions) {
+      if (netExceptionCovers(e, b)) {
+        candidate.add(b.line);
+        break;
+      }
+    }
+  }
+
+  return {
+    removed_lines: [...candidate].sort(),
+  };
+}
+
+// Exception coverage: same host-reach as a block cover, plus the exception's
+// type mask must cover the block's (an optionless `@@||host^` unbinds every
+// type incl. document/popup — exceptions are not limited to OPTIONLESS_TYPES),
+// party matches, and scope ⊇.
+function netExceptionCovers(e, v) {
+  // host reach: equal host with path-prefix over, or label-suffix host
+  // spanning all of the victim's paths.
+  if (e.h === v.h) {
+    if (e.p !== '' && !netPathCovers(e.p, v.p)) return false;
+  } else {
+    if (v.h.length <= e.h.length || !v.h.endsWith(e.h)) return false;
+    if (v.h[v.h.length - e.h.length - 1] !== '.') return false;
+    if (e.p !== '') return false;
+  }
+  // types: an exception's mask must cover the victim's mask, but a bare
+  // exception (no type options) is unbind-all.
+  if (e.types.length !== 0) {
+    const mv = new Set(v.types.length === 0 ? OPTIONLESS_TYPES : v.types);
+    for (const t of mv) if (!e.types.includes(t)) return false;
+  }
+  if (e.party !== 'both' && e.party !== v.party) return false;
+  if (e.scope === null) {
+    // exception applies on all documents
+  } else if (v.scope === null) {
+    return false;
+  } else {
+    // The exception must unbind every document the block applies on,
+    // otherwise dropping the block unblocks it elsewhere: e.scope ⊇ v.scope.
+    const es = new Set(e.scope);
+    if (!v.scope.every((t) => es.has(t))) return false;
+  }
+  return true;
 }

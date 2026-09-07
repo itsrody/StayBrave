@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { subsume, subsumeScoped, parseSimpleRule, countWildcardDomainRules } from '../src/network.js';
+import { subsume, subsumeScoped, parseSimpleRule, countWildcardDomainRules, subsumeSuperset, subsumeDeadByException } from '../src/network.js';
 
 const run = (lines) => subsume(lines.map(String));
 
@@ -234,4 +234,113 @@ test('subsumeScoped returns the removed lines as third element', () => {
   assert.equal(count, 1);
   assert.deepEqual(kept, ['||example.com/ads^']);
   assert.deepEqual(removedLines, ['||example.com/ads^$script,third-party']);
+});
+
+test('superset: parent host covers child (candidate)', () => {
+  const { removed_lines } = subsumeSuperset([
+    '||example.com^',
+    '||sub.example.com^',
+    '||unrelated.com^',
+  ]);
+  assert.deepEqual(removed_lines, ['||sub.example.com^']);
+});
+
+test('superset: path-prefix covers same host (candidate)', () => {
+  const { removed_lines } = subsumeSuperset([
+    '||example.com/foo^',
+    '||example.com/foo/bar^',
+    '||example.com/foobar^',
+  ]);
+  assert.deepEqual(removed_lines, ['||example.com/foo/bar^']);
+});
+
+test('superset: optionless covers typed child (candidate)', () => {
+  const { removed_lines } = subsumeSuperset([
+    '||example.com^',
+    '||sub.example.com^$script,image',
+  ]);
+  assert.deepEqual(removed_lines, ['||sub.example.com^$script,image']);
+});
+
+test('superset: $document never covered by optionless (no candidate)', () => {
+  const { removed_lines } = subsumeSuperset([
+    '||example.com^',
+    '||sub.example.com^$document',
+  ]);
+  assert.deepEqual(removed_lines, []);
+});
+
+test('superset: scoped cover never covers unscoped victim (no candidate)', () => {
+  const { removed_lines } = subsumeSuperset([
+    '||example.com^$domain=news.com',
+    '||sub.example.com^',
+  ]);
+  assert.deepEqual(removed_lines, []);
+});
+
+test('superset: scope superset covers scoped victim (candidate)', () => {
+  const { removed_lines } = subsumeSuperset([
+    '||example.com^$domain=news.com|other.com',
+    '||sub.example.com^$domain=news.com',
+  ]);
+  assert.deepEqual(removed_lines, ['||sub.example.com^$domain=news.com']);
+});
+
+test('superset: identical lines never self-candidates', () => {
+  const { removed_lines } = subsumeSuperset(['||example.com^', '||example.com^']);
+  assert.deepEqual(removed_lines, []);
+});
+
+test('superset: exceptions never candidates', () => {
+  const { removed_lines } = subsumeSuperset([
+    '||example.com^',
+    '||sub.example.com^',
+    '@@||example.com^',
+  ]);
+  assert.deepEqual(removed_lines, ['||sub.example.com^']);
+});
+
+test('superset: same-host no-path covers typed same-host victim (candidate)', () => {
+  const { removed_lines } = subsumeSuperset([
+    '||example.com^',
+    '||example.com^$script',
+  ]);
+  assert.deepEqual(removed_lines, ['||example.com^$script']);
+});
+
+test('dead-by-exception: equal exception retires block (candidate)', () => {
+  const { removed_lines } = subsumeDeadByException(['||example.com^', '@@||example.com^']);
+  assert.deepEqual(removed_lines, ['||example.com^']);
+});
+
+test('dead-by-exception: broader host exception retires subdomain block (candidate)', () => {
+  const { removed_lines } = subsumeDeadByException([
+    '||sub.example.com^',
+    '@@||example.com^',
+  ]);
+  assert.deepEqual(removed_lines, ['||sub.example.com^']);
+});
+
+test('dead-by-exception: scoped exception never retires unscoped block (no candidate)', () => {
+  const { removed_lines } = subsumeDeadByException([
+    '||example.com^',
+    '@@||example.com^$domain=news.com',
+  ]);
+  assert.deepEqual(removed_lines, []);
+});
+
+test('dead-by-exception: bare exception retires typed block (candidate)', () => {
+  const { removed_lines } = subsumeDeadByException([
+    '||example.com^$script',
+    '@@||example.com^',
+  ]);
+  assert.deepEqual(removed_lines, ['||example.com^$script']);
+});
+
+test('dead-by-exception: narrower typed exception never retires it (no candidate)', () => {
+  const { removed_lines } = subsumeDeadByException([
+    '||example.com^',
+    '@@||example.com^$script',
+  ]);
+  assert.deepEqual(removed_lines, []);
 });

@@ -133,3 +133,112 @@ export async function verifyRemovedCoverage(
     holes,
   };
 }
+
+// Authoritative evidence gate for the *candidate* superset / dead-block
+// removals produced by `subsumeSuperset` / `subsumeDeadByException`. Because
+// uBO's domain=-scope and party masking interact in ways a host-suffix
+// predicate over-approximates (the engine oracle caught real holes), nothing
+// is removed on the predicate's word alone: every candidate is probed against
+// the survivor set and only the candidates whose outcome is unchanged by their
+// removal are certified.
+//
+// Crucially the probe set EXCLUDES every candidate rule: a candidate must not
+// be allowed to certify itself (with itself present, any self-matching candidate
+// would trivially "block" its own probe and the gate would be vacuous). The
+// cover relation is transitive and acyclic, so a request a candidate chain
+// covers is still directly blocked by the chain's non-candidate maximum —
+// probing against non-candidates certifies exactly the provable subset.
+//
+// Outcome expectations differ by pass:
+//   * superset candidates (`subsumeSuperset`): removing the victim must keep
+//     the request BLOCKED (a non-candidate survivor still matches it); and
+//   * dead-by-exception candidates (`subsumeDeadByException`): the victim was
+//     unblocked pre-removal (an exception unbinds it); post-removal the same
+//     request must still be UNBLOCKED.
+//
+// Unlike `verifyRemovedCoverage` (which samples and uses a synthetic third-
+// party origin), this gate probes EVERY candidate and, for domain=-scoped
+// victims, uses one of the victim's own document hosts as the origin so the
+// probe actually exercises the scope the removal would affect.
+export async function certifySupersetRemovals(candidateLines, survivorLines, deadByExceptionLines = []) {
+  const expectUnblocked = new Set(deadByExceptionLines);
+  const probes = [];
+  for (const line of candidateLines) {
+    const isExc = line.startsWith('@@');
+    const body = isExc ? line.slice(2) : line;
+    const idx = body.lastIndexOf('$');
+    const pattern = idx < 0 ? body : body.slice(0, idx);
+    const opts = idx < 0 ? [] : body.slice(idx + 1).split(',').map((o) => o.trim());
+    const simple = parseSimpleRule(pattern);
+    if (simple === null) continue;
+    let type = 'script';
+    const typeMap = {
+      script: 'script', image: 'image', stylesheet: 'stylesheet',
+      subdocument: 'sub_frame', xmlhttprequest: 'xmlhttprequest', xhr: 'xmlhttprequest',
+      object: 'object', media: 'media', font: 'font', websocket: 'websocket',
+      ping: 'ping', other: 'other', document: 'main_frame', popup: 'popup',
+      'object-subrequest': 'object',
+    };
+    if (opts.includes('document')) type = 'main_frame';
+    else if (opts.includes('popup')) type = 'popup';
+    else for (const o of opts) if (typeMap[o]) { type = typeMap[o]; break; }
+
+    const scheme = opts.includes('https') && !opts.includes('http') ? 'https' : 'http';
+    const token = Math.random().toString(36).slice(2, 10);
+    const pp = simple.path === '' ? '' : simple.path.replace(/\/$/, '') + '/';
+    const url = `${scheme}://${simple.host}/${pp}probe-${token}.js`;
+
+    // Probes must exercise the scope a removal would affect: for a domain=-
+    // scoped victim use its own document hosts as origins (plus a synthetic
+    // third-party origin so an unscoped victim is also checked).
+    const docHosts = [];
+    for (const o of opts) {
+      if (o.startsWith('domain=')) {
+        for (const d of o.slice(7).split('|').map((x) => x.trim())
+          .filter((x) => x && !x.startsWith('~') && !x.includes('*') && /^[0-9a-zA-Z.-]+$/.test(x))) {
+          docHosts.push(d.toLowerCase());
+        }
+      }
+    }
+    const origins = opts.includes('first-party')
+      ? [`${scheme}://${simple.host}/`]
+      : docHosts.length > 0
+        ? docHosts.map((d) => `http://${d}/`)
+        : [`http://origin-${token}.example.net/`];
+    for (const originURL of origins) {
+      probes.push({ line, probe: { url, type, originURL, tabId: 1, docId: 1, frameId: 0 } });
+    }
+  }
+
+  // The probe set must not let a candidate certify itself: drop every
+  // candidate rule from the survivors before matching.
+  const candidateSet = new Set(candidateLines);
+  const probeSet = survivorLines.filter((l) => !candidateSet.has(l));
+
+  const engine = await StaticNetFilteringEngine.create();
+  let certified = [];
+  try {
+    if (probeSet.length > 0) {
+      await engine.useLists([{ name: 'staybrave-certify-survivors', raw: probeSet.join('\n') }]);
+    }
+    // A candidate is certified only if every probe on the origins relevant to
+    // its scope (its own domain= docs) preserves its pre-removal outcome.
+    const perLine = new Map();
+    for (const { line, probe } of probes) {
+      const res = await engine.matchRequest(probe);
+      const blocked = (res & 1) === 1;
+      if (!perLine.has(line)) perLine.set(line, { total: 0, okay: 0 });
+      const acc = perLine.get(line);
+      acc.total += 1;
+      const want = expectUnblocked.has(line) ? !blocked : blocked;
+      if (want) acc.okay += 1;
+    }
+    certified = candidateLines.filter((l) => {
+      const acc = perLine.get(l);
+      return acc !== undefined && acc.okay === acc.total;
+    });
+  } finally {
+    await StaticNetFilteringEngine.release();
+  }
+  return { certified, candidates: candidateLines };
+}

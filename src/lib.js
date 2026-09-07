@@ -5,8 +5,8 @@ import { Fetcher } from './fetch.js';
 import { analyzeText, emptyStats } from './analyze.js';
 import { makeParser, TRUSTED_SCRIPTLET_TOKENS } from './ubo.js';
 import { optimize, refreshDiagnostics } from './optimize.js';
-import { verifyRemovedCoverage } from './engine.js';
-import { detectDroppedCosmetics } from './cosmetic-engine.js';
+import { verifyRemovedCoverage, certifySupersetRemovals } from './engine.js';
+import { detectDroppedCosmetics, certifyCosmeticDeadHides } from './cosmetic-engine.js';
 import { subtractProvided } from './provided.js';
 import { writeOutput } from './writer.js';
 
@@ -82,6 +82,53 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
     }
   }
   optimized.cosmetic_engine_dropped = cosmeticDroppedCount;
+
+  // Cosmetic A/C gate: remove only the dead hides uBO's own cosmetic engine
+  // certifies as already-withdrawn (the exception suppresses delivery across the
+  // hide's whole scope), so the removals are provable-by-construction.
+  const cosmeticDeadCandidates = optimized.cosmetic_dead_candidates ?? [];
+  optimized.cosmetic_dead_candidates_count = cosmeticDeadCandidates.length;
+  optimized.cosmetic_dead_removed = 0;
+  if (cosmeticDeadCandidates.length > 0) {
+    const certifiedDead = await certifyCosmeticDeadHides(
+      cosmeticDeadCandidates,
+      optimized.rules,
+      { name: config.output.title }
+    );
+    if (certifiedDead.length > 0) {
+      const dead = new Set(certifiedDead);
+      optimized.rules = optimized.rules.filter((l) => !dead.has(l));
+      optimized.cosmetic_dead_removed = certifiedDead.length;
+    }
+  }
+
+  // Gate the candidate superset / dead-block network removals through uBO's own
+  // engine. The predicate is deliberately permissive; only the candidates the
+  // survivor set still blocks are actually removed, so the shipped removals
+  // are provable-by-construction.
+  let engineSuperset = null;
+  const supCandidates = optimized.engine_superset_candidates ?? [];
+  const deadCandidates = optimized.engine_dead_candidates ?? [];
+  const allCandidates = [...new Set([...supCandidates, ...deadCandidates])].sort();
+  optimized.superset_removed = 0;
+  optimized.superset_candidates = allCandidates.length;
+  if (allCandidates.length > 0) {
+    engineSuperset = await certifySupersetRemovals(
+      allCandidates,
+      optimized.rules,
+      deadCandidates
+    );
+    const naughty = new Set(engineSuperset.certified);
+    const keep = [];
+    for (const l of optimized.rules) if (!naughty.has(l)) keep.push(l);
+    optimized.superset_removed = keep.length < optimized.rules.length
+      ? optimized.rules.length - keep.length
+      : 0;
+    optimized.rules = keep;
+    if (optimized.superset_removed > 0) {
+      optimized.removed_network.push(...engineSuperset.certified);
+    }
+  }
 
   // Engine-certify the optimizer: prove the rules our subsumption passes
   // removed are still blocked by the survivors, through uBO's own SNFE. Any

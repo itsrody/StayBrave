@@ -765,7 +765,56 @@ export function subsumeSelectors(lines) {
 }
 
 // ---------------------------------------------------------------------------
-// Pass 3: procedural subsumption.
+// A/C dead-hide candidates.
+//
+// uBO cosmetic exceptions withdraw the matching selector for the pages they
+// cover, INCLUDING host-scoped hides by a generic exception (engine-verified:
+// `#@#.ad` + `a.com##.ad` → empty, `a.com#@#.ad` + `sub.a.com##.ad` → empty).
+// A same-selector, non-procedural hide is therefore a dead candidate when an
+// exception covers its scope (a generic exception covers every scope).
+// Candidate-only: the cosmetic engine gate (`certifyCosmeticDeadHides`) probes
+// delivery before any removal is committed.
+export function deadHidesByException(lines) {
+  const hiddenBySelector = new Map();
+  const exceptions = [];
+  for (const line of lines) {
+    const parsed = splitCosmetic(line);
+    if (parsed === null) continue;
+    const { host, sep, selector } = parsed;
+    if (isProcedural(selector)) continue;
+    const loc = host === '' ? [] : positiveLocationTokens(host);
+    if (sep === CLASS_SEP) {
+      if (!hiddenBySelector.has(selector)) hiddenBySelector.set(selector, []);
+      hiddenBySelector.get(selector).push({ line, loc });
+    } else {
+      exceptions.push({ line, selector, loc });
+    }
+  }
+  const hiddenScopeCovered = new Set();
+  for (const e of exceptions) {
+    if (e.loc === undefined) continue;
+    const hidden = hiddenBySelector.get(e.selector);
+    if (hidden === undefined) continue;
+    for (const h of hidden) {
+      if (hiddenScopeCovered.has(h.line)) continue;
+      if (h.loc === undefined) continue;
+      if (exceptionScopeCovers(e.loc, h.loc)) hiddenScopeCovered.add(h.line);
+    }
+  }
+  return { removed_lines: [...hiddenScopeCovered].sort() };
+}
+
+// Exception scope covers a hide scope when the exception is generic (applies
+// everywhere) or its location tokens cover the hide's via the same
+// label-suffix entity-probe semantics uBO uses for hides.
+function exceptionScopeCovers(eLoc, vLoc) {
+  if (eLoc.length === 0) return true;
+  if (vLoc.length === 0) return false;
+  const reg = new Map();
+  for (const t of eLoc) if (t.kind === 'host') reg.set(t.value, registrableDomain(t.value));
+  for (const t of vLoc) if (t.kind === 'host') reg.set(t.value, registrableDomain(t.value));
+  return tokenSetsCover(eLoc, vLoc, reg);
+}
 
 export function plainBase(selector) {
   let base = selector;
@@ -783,6 +832,9 @@ export function plainBase(selector) {
   if (base === '' || isProcedural(base)) return undefined;
   return base;
 }
+
+// ---------------------------------------------------------------------------
+// Pass 3: procedural subsumption.
 
 const CONSTRAINT_OPS = [
   OP_HAS_TEXT,

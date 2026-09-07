@@ -63,9 +63,19 @@ export function writeOutput(path, outputCfg, optimized, summaries) {
   chunks.push(
     `! Engine-filtered cosmetics (dead in stock uBO): ${optimized.cosmetic_engine_dropped ?? 0}`
   );
+  if ((optimized.cosmetic_dead_candidates_count ?? 0) > 0) {
+    chunks.push(
+      `! Cosmetic dead-hide gate (engine-certified removals): ${optimized.cosmetic_dead_removed ?? 0} removed of ${optimized.cosmetic_dead_candidates_count} candidate(s) with their hide already withdrawn by an exception`
+    );
+  }
   chunks.push(
     `! Wildcard-TLD $domain rules (kept to avoid broadening): ${optimized.wildcard_domain_rules}`
   );
+  if ((optimized.superset_candidates ?? 0) > 0) {
+    chunks.push(
+      `! Superset gate (engine-certified removals): ${optimized.superset_removed ?? 0} removed of ${optimized.superset_candidates} candidate(s) probed through uBO's own static network engine`
+    );
+  }
   const tb = optimized.token_buckets ?? {};
   const tk = tb.tokened ?? optimized.hostname_tokened ?? 0;
   const jo = tb.justOrigin ?? optimized.just_origin ?? 0;

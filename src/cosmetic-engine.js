@@ -22,6 +22,7 @@ import {
   CompiledListReader,
 } from '@gorhill/ubo-core/js/static-filtering-io.js';
 import { takeLoggedMessages } from '../vendor/ubo/logger.js';
+import { splitCosmetic, registrableDomain } from './cosmetic.js';
 
 // vAPI is referenced at CosmeticFilteringEngine construction
 // (vAPI.defer.create) and at retrieval (vAPI.tabs.insertCSS). The probe path
@@ -142,4 +143,47 @@ export async function detectDroppedCosmetics(
     if (byMessage.has(form)) out.set(byMessage.get(form), d.text);
   }
   return out;
+}
+
+// Authoritative evidence gate for the cosmetic A/C dead-hide candidates
+// (`deadHidesByException`): a same-selector exception-withdrawing a hide across
+// its whole scope is only certified when uBO's own cosmetic engine, with every
+// rule still present, refuses to deliver that selector at every positive host
+// of the hide's scope. Removing such a hide cannot change delivery — the
+// engine already suppressed it.
+export async function certifyCosmeticDeadHides(
+  candidateLines,
+  allLines,
+  { name = 'staybrave' } = {}
+) {
+  const { probe } = await makeCosmeticEngine(allLines, { name });
+  const certified = [];
+  for (const line of candidateLines) {
+    const parsed = splitCosmetic(line);
+    if (parsed === null || parsed.host === '' || parsed.sep !== '##') continue;
+    let covered = true;
+    for (const part of parsed.host.split(',')) {
+      const h = part.trim().toLowerCase();
+      if (
+        h === '' ||
+        h.startsWith('~') ||
+        h.includes('*') ||
+        /[^0-9a-zA-Z.-]/.test(h)
+      ) {
+        covered = false;
+        break;
+      }
+      const domain = registrableDomain(h);
+      const out = probe(h, domain ?? h, `http://${h}/`);
+      const injected = (out.injectedCSS ?? '')
+        .split('\n')
+        .map((s) => s.trim().replace(/,$/, ''));
+      if (injected.includes(parsed.selector)) {
+        covered = false;
+        break;
+      }
+    }
+    if (covered) certified.push(line);
+  }
+  return certified;
 }
