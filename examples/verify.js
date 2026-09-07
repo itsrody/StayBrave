@@ -400,9 +400,33 @@ let cosFail = 0;
     // a CSS rule), procedural/pseudo selectors land as a JSON task whose `raw`
     // is the rule selector. Route by what the engine actually returned, not by
     // a local classification that may disagree with the engine's.
+    // Collapse whitespace runs outside quoted strings: CSS treats any run of
+    // whitespace in a selector as one separator, so the engine's reserialized
+    // rule (`a  b` -> `a b`) must compare equal to the source rule. Runs inside
+    // a quoted attribute value are preserved so distinct strings stay distinct.
+    const collapseWS = (s) => {
+      let out = '';
+      let quote = null;
+      let wasWS = false;
+      for (const ch of s) {
+        if (quote !== null) {
+          out += ch;
+          if (ch === quote) quote = null;
+        } else if (ch === '"' || ch === "'") {
+          quote = ch;
+          out += ch;
+        } else if (/\s/.test(ch)) {
+          wasWS = true;
+        } else {
+          if (wasWS) out += ' ';
+          wasWS = false;
+          out += ch;
+        }
+      }
+      return out;
+    };
     const norm = (s) =>
-      s
-        .trim()
+      collapseWS(s.trim())
         .replace(/,$/, '')
         .replace(/,(?=\S)/g, ', ')
         .replace(/\s*([>+~])\s*/g, ' $1 ')
