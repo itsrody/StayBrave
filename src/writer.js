@@ -60,9 +60,16 @@ export function writeOutput(path, outputCfg, optimized, summaries) {
       `! Rewrites: ${optimized.canonicalized_rules} net-option spelling(s) canonicalized (uBO synonym map; duplicates collapsed)`
     );
   }
-  chunks.push(
-    `! Engine-filtered cosmetics (dead in stock uBO): ${optimized.cosmetic_engine_dropped ?? 0}`
-  );
+  if ((optimized.cosmetic_engine_dropped ?? 0) > 0) {
+    chunks.push(
+      `! Engine-filtered cosmetics (dead in stock uBO): ${optimized.cosmetic_engine_dropped}`
+    );
+  }
+  if ((optimized.cosmetic_groups_merged ?? 0) > 0) {
+    chunks.push(
+      `! Cosmetic repack: ${optimized.cosmetic_groups_merged} line(s) collapsed into comma-separated same-scope lists (uBO delivers them as one native CSS rule)`
+    );
+  }
   if ((optimized.cosmetic_dead_candidates_count ?? 0) > 0) {
     chunks.push(
       `! Cosmetic dead-hide gate (engine-certified removals): ${optimized.cosmetic_dead_removed ?? 0} removed of ${optimized.cosmetic_dead_candidates_count} candidate(s) with their hide already withdrawn by an exception`

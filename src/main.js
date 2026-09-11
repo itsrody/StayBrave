@@ -103,6 +103,11 @@ try {
       `cosmetic engine: ${fmt(o.cosmetic_engine_dropped)} dead rule(s) dropped (stock uBO would ignore them)`
     );
   }
+  if (o.cosmetic_groups_merged > 0) {
+    console.log(
+      `cosmetic repack: ${fmt(o.cosmetic_groups_merged)} line(s) collapsed into comma-separated same-scope lists`
+    );
+  }
   if (o.cosmetic_dead_candidates_count > 0) {
     console.log(
       `cosmetic dead-hide gate: ${fmt(o.cosmetic_dead_candidates_count)} candidate(s), ${fmt(o.cosmetic_dead_removed)} certified exception-withdrawn & removed`

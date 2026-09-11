@@ -12,6 +12,7 @@ import {
   firstClassIdToken,
   deadHidesByException,
   deadCosmeticExceptions,
+  groupCosmeticSelectors,
 } from '../src/cosmetic.js';
 
 test('splitCosmetic handles hide/unhide/html/strong', () => {
@@ -272,4 +273,114 @@ test('dead-cosmetic-exception: id selector exception is a candidate when no id h
     'example.com#@##no-such-id',
   ]);
   assert.deepEqual(removed_lines, ['example.com#@##no-such-id']);
+});
+
+// ---------------------------------------------------------------------------
+// groupCosmeticSelectors
+
+test('groupCosmeticSelectors merges same-scope pure-CSS hides into one line', () => {
+  const { lines, merged } = groupCosmeticSelectors([
+    'example.com##.a',
+    'example.com##.b',
+    'example.com##.c',
+  ]);
+  assert.equal(merged, 2);
+  assert.deepEqual(lines, ['example.com##.a,.b,.c']);
+});
+
+test('groupCosmeticSelectors keeps exceptions (#@#) separate from hides', () => {
+  const { lines, merged } = groupCosmeticSelectors([
+    'example.com##.a',
+    'example.com##.b',
+    'example.com#@#.a',
+  ]);
+  assert.equal(merged, 1);
+  assert.deepEqual(lines, ['example.com##.a,.b', 'example.com#@#.a']);
+});
+
+test('groupCosmeticSelectors skips procedural selectors', () => {
+  const { lines, merged } = groupCosmeticSelectors([
+    'example.com##.a',
+    'example.com##.b:has-text(x)',
+  ]);
+  assert.equal(merged, 0);
+  assert.deepEqual(lines, ['example.com##.a', 'example.com##.b:has-text(x)']);
+});
+
+test('groupCosmeticSelectors skips scriptlet lines', () => {
+  const { lines, merged } = groupCosmeticSelectors([
+    'example.com##.a',
+    'example.com##+js(noop)',
+  ]);
+  assert.equal(merged, 0);
+  assert.deepEqual(lines, ['example.com##.a', 'example.com##+js(noop)']);
+});
+
+test('groupCosmeticSelectors passes non-cosmetic lines through', () => {
+  const { lines } = groupCosmeticSelectors([
+    '||example.com^',
+    'example.com##.a',
+    'example.com##.b',
+  ]);
+  assert.deepEqual(lines, ['||example.com^', 'example.com##.a,.b']);
+});
+
+test('groupCosmeticSelectors passes single-scope lines through unchanged', () => {
+  const input = ['example.com##.a'];
+  const { lines, merged } = groupCosmeticSelectors(input);
+  assert.equal(merged, 0);
+  assert.deepEqual(lines, input);
+});
+
+test('groupCosmeticSelectors merges generic (#) scopes correctly', () => {
+  const { lines, merged } = groupCosmeticSelectors([
+    '##.a',
+    '##.b',
+  ]);
+  assert.equal(merged, 1);
+  assert.deepEqual(lines, ['##.a,.b']);
+});
+
+test('groupCosmeticSelectors respects maxLineLength cap', () => {
+  const sels = Array.from({ length: 100 }, (_, i) => `.s${i}`);
+  const input = sels.map((s) => `example.com##${s}`);
+  const { lines } = groupCosmeticSelectors(input, { maxLineLength: 40 });
+  for (const l of lines) {
+    assert.ok(l.length <= 40, `${l.length} <= 40: ${l.slice(0, 60)}...`);
+  }
+  // total selectors = 100, split into chunks ≤40 chars
+  assert.ok(lines.length > 1, 'should produce multiple chunk lines');
+});
+
+test('groupCosmeticSelectors does not repeat a selector already grouped in a comma list', () => {
+  const { lines, merged } = groupCosmeticSelectors([
+    'example.com##.a,.b',
+    'example.com##.a',
+  ]);
+  assert.equal(merged, 1);
+  assert.deepEqual(lines, ['example.com##.a,.b']);
+});
+
+test('groupCosmeticSelectors does not affect network lines in the middle of cosmetic lines', () => {
+  const input = [
+    '||example.com^',
+    'example.com##.a',
+    'example.com##.b',
+    '||second.net^',
+  ];
+  const { lines } = groupCosmeticSelectors(input);
+  assert.deepEqual(lines, [
+    '||example.com^',
+    'example.com##.a,.b',
+    '||second.net^',
+  ]);
+});
+
+test('groupCosmeticSelectors keeps already-comma-list lines intact (no double merge)', () => {
+  const { lines, merged } = groupCosmeticSelectors([
+    'example.com##.a,.b',
+    'example.com##.c',
+  ]);
+  assert.equal(merged, 1);
+  assert.deepEqual(lines, ['example.com##.a,.b,.c']);
 });

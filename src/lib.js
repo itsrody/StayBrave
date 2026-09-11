@@ -7,6 +7,7 @@ import { makeParser, TRUSTED_SCRIPTLET_TOKENS } from './ubo.js';
 import { optimize, refreshDiagnostics } from './optimize.js';
 import { verifyRemovedCoverage, certifySupersetRemovals, certifyDeadExceptionRemovals } from './engine.js';
 import { detectDroppedCosmetics, certifyCosmeticDeadHides, certifyDeadCosmeticExceptions } from './cosmetic-engine.js';
+import { groupCosmeticSelectors } from './cosmetic.js';
 import { subtractProvided } from './provided.js';
 import { writeOutput } from './writer.js';
 
@@ -212,6 +213,19 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
     optimized.provided_exact_removed = 0;
     optimized.provided_network_subsumed = 0;
     optimized.provided_cosmetic_covered = 0;
+  }
+
+  // Last organizing pass: repack each host's pure-CSS cosmetic rules into
+  // single comma-separated lines (uBO delivers those as one native CSS rule, so
+  // no delivery behaviour changes — duplicated prefixes are the only byte that
+  // disappears). Runs post-verification, so it can never mask a removal.
+  optimized.cosmetic_groups_merged = 0;
+  if (config.filter.cosmetic_cost.merge_same_scope_selectors) {
+    const grouped = groupCosmeticSelectors(optimized.rules);
+    if (grouped.merged > 0) {
+      optimized.cosmetic_groups_merged = grouped.merged;
+      optimized.rules = grouped.lines;
+    }
   }
 
   // Recompute token buckets / channels / efficiency / exclusives against the

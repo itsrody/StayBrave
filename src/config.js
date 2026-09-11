@@ -44,6 +44,7 @@ export function defaults() {
         split_comma_lists: false,
         subsume_selectors: true,
         subsume_procedural: true,
+        merge_same_scope_selectors: true,
       },
     },
     // External lists already enabled in uBO (uBlocks' built-ins, EasyList in

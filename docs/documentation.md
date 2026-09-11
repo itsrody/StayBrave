@@ -228,7 +228,13 @@ node src/main.js --help
   - `cosmetic_cost` — independent toggles for the cosmetic passes
     (`split_comma_lists` default off — pure-CSS comma lists are canonicalized
     to grouped form instead of split; `subsume_selectors`, `subsume_procedural`
-    default on).
+    default on). `merge_same_scope_selectors` (default on) is the writer's
+    repacking pass: after verification, each scope's pure-CSS cosmetic rules
+    (`a.com##.x` + `a.com##.y`) collapse into one comma-separated line
+    (`a.com##.x,.y`). uBO delivers a comma list as a single native CSS rule,
+    so no selector or delivery behaviour changes — only the duplicated
+    `a.com##` prefixes and newlines disappear. Procedural/action selectors,
+    scriptlets and HTML filters are never merged.
 - `lists` (required) — array of sources:
   - `name` (required) — display name used in logs and the header.
   - `url` (required) — http(s) URL of the raw filter list.

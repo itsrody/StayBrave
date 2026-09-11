@@ -372,6 +372,91 @@ export function channelCounts(lines) {
 }
 
 // ---------------------------------------------------------------------------
+// Output repacking: same-scope pure-CSS cosmetic rules collapse into one line.
+//
+// uBO delivers a comma-separated pure-CSS list (`a.com##.x, .y`) as a single
+// native CSS rule — the engine registers each selector separately, so merging
+// `a.com##.x` + `a.com##.y` into `a.com##.x,.y` executes exactly what the two
+// lines did, minus the repeated `a.com##` prefix (one `host##` per line becomes
+// one per group). Procedural/action selectors (uBO compiles each one on its
+// own), scriptlets and HTML filters are never merged: they can't sit in a comma
+// list. This runs on the final, post-verification rule set, so it is pure
+// repacking — not a single selector is added, removed or reworded.
+
+export function groupCosmeticSelectors(lines, { maxLineLength = 20000 } = {}) {
+  const groups = new Map();
+  for (let index = 0; index < lines.length; index += 1) {
+    const parsed = splitCosmetic(lines[index]);
+    if (parsed === null || !groupableSelector(parsed.selector)) continue;
+    const key = `${parsed.host}${parsed.sep}`;
+    let group = groups.get(key);
+    if (group === undefined) {
+      group = { key, first: index, memberIdx: [], selectors: [] };
+      groups.set(key, group);
+    }
+    group.memberIdx.push(index);
+    group.selectors.push(parsed.selector);
+  }
+
+  const emitAt = new Map();
+  const skip = new Set();
+  let merged = 0;
+  for (const group of groups.values()) {
+    // Flatten into unique top-level comma members so an already-present
+    // selector in a comma list is not repeated when merged.
+    const parts = new Set();
+    for (const sel of group.selectors) {
+      for (const p of splitTopLevel(sel, ',')) {
+        if (p !== '') parts.add(p);
+      }
+    }
+    if (parts.size < 2) continue;
+    const sorted = [...parts].sort();
+    const built = buildGroupedScope(group.key, sorted, maxLineLength);
+    emitAt.set(group.first, built);
+    merged += group.memberIdx.length - built.length;
+    for (let k = 1; k < group.memberIdx.length; k += 1) {
+      skip.add(group.memberIdx[k]);
+    }
+  }
+  if (merged === 0) return { lines, merged: 0 };
+
+  const out = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (skip.has(index)) continue;
+    const built = emitAt.get(index);
+    if (built !== undefined) out.push(...built);
+    else out.push(lines[index]);
+  }
+  return { lines: out, merged };
+}
+
+function groupableSelector(selector) {
+  if (selector.startsWith('+js')) return false;
+  if (isProcedural(selector)) return false;
+  return true;
+}
+
+function buildGroupedScope(scope, selectors, maxLineLength) {
+  const out = [];
+  let current = scope;
+  let count = 0;
+  for (const sel of selectors) {
+    const extra = count === 0 ? sel : `,${sel}`;
+    if (count > 0 && current.length + extra.length > maxLineLength) {
+      out.push(current);
+      current = scope + sel;
+      count = 1;
+    } else {
+      current += extra;
+      count += 1;
+    }
+  }
+  if (current !== '') out.push(current);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Location tokens and scope coverage (uBO-safe subsumption).
 
 class LocToken {
