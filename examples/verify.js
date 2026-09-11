@@ -420,6 +420,10 @@ let cosFail = 0;
   // missing only when no positive host of the rule's scope delivers the
   // selector, and a quotes-stripped retry is made before declaring it gone.
   const qu = (s) => s.replace(/["']/g, '');
+  // uBO also unescapes redundancy: `px\]` inside a quoted attribute string is
+  // written back out as `px]` (the `]` needs no escape in a quoted string), so
+  // a backslash-stripped retry is made before declaring a selector missing.
+  const sl = (s) => s.replace(/\\(.)/g, '$1');
   const stride =
     cosmeticEngineLines.length > probeLimit
       ? Math.ceil(cosmeticEngineLines.length / probeLimit)
@@ -461,6 +465,11 @@ let cosFail = 0;
         found =
           cssLines.map((s) => qu(s)).includes(qu(ref)) ||
           procLines.map((s) => qu(s)).includes(qu(ref));
+      }
+      if (!found) {
+        found =
+          cssLines.map((s) => sl(s)).includes(sl(ref)) ||
+          procLines.map((s) => sl(s)).includes(sl(ref));
       }
       if (found) {
         present = true;
