@@ -45,6 +45,8 @@
     { "name": "AdGuard URL Tracking", "url": "https://filters.adtidy.org/extension/ublock/filters/17_optimized.txt", "enabled": true },
     { "name": "ABP Anti-circumvention", "url": "https://easylist-downloads.adblockplus.org/abp-filters-anti-cv.txt", "enabled": true },
     { "name": "Fanboy's Annoyances", "url": "https://filters.adtidy.org/extension/ublock/filters/122_optimized.txt", "enabled": true },
-    { "name": "StevenBlack hosts", "url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", "enabled": true, "hosts": true }
+    { "name": "StevenBlack hosts", "url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", "enabled": true, "hosts": true },
+    { "name": "Privacy Essentials (yokoffing)", "url": "https://raw.githubusercontent.com/yokoffing/filterlists/refs/heads/main/privacy_essentials.txt", "enabled": true },
+    { "name": "Annoyance List (yokoffing)", "url": "https://raw.githubusercontent.com/yokoffing/filterlists/refs/heads/main/annoyance_list.txt", "enabled": true }
   ]
 }
