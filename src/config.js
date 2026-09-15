@@ -9,6 +9,12 @@ function resolveFromRoot(p) {
 
 export function defaults() {
   return {
+    // Which browser family the output targets: `classic` (Firefox uBO 1.74+)
+    // or `lite` (uBO Lite / MV3, declarativeNetRequest). The profile selects
+    // the preparser environment (FIREFOX_ENV vs MV3_ENV), the compatibility
+    // filter (src/lite.js), the network-rule budget (lite.network_budget) and
+    // the default output file/title.
+    profile: 'classic',
     fetch: {
       concurrency: 16,
       timeout_secs: 30,
@@ -28,6 +34,15 @@ export function defaults() {
         'StayBrave Classic is a merged, de-duplicated, sorted filter list for Firefox uBlock Origin 1.74+.',
       expires: '3 days',
       homepage: 'https://github.com/itsrody/StayBrave',
+    },
+    // Profile-specific tuning. Only consumed when `profile` is `lite`.
+    lite: {
+      // Hard cap on the number of network rules in the output. uBO Lite
+      // compiles a subscribed list into dynamic DNR rules; Chromium guarantees
+      // 30 000 dynamic rules per extension, so 25 000 leaves headroom for the
+      // user's own dynamic rules and other subscribed lists. Cosmetic rules
+      // are not counted (they ship as CSS content scripts, not DNR rules).
+      network_budget: 25000,
     },
     filter: {
       scriptlets: true,
@@ -56,11 +71,37 @@ export function defaults() {
   };
 }
 
+// Default output identity for the lite profile; a user-supplied `output`
+// section in lists.json always wins for a persisted `profile`.
+export function liteOutputDefaults(isLite) {
+  return isLite
+    ? {
+        file: 'output/StayBraveLite.txt',
+        title: 'StayBrave Lite',
+        description:
+          'StayBrave Lite is a budget-capped, MV3-compatible filter list for ' +
+          'uBO Lite (Chromium). It is limited to what the declarative engine can ' +
+          'execute: CSS-only cosmetic rules and DNR-convertible network rules, ' +
+          'with scriptlets, procedural cosmetics, entity-wildcard $domain rules ' +
+          'and regex rules removed.',
+      }
+    : {};
+}
+
 function mergeWithDefaults(cfg) {
   const d = defaults();
+  const profile = cfg.profile ?? d.profile;
+  if (profile !== 'classic' && profile !== 'lite') {
+    throw new Error(
+      `lists.json: "profile" must be "classic" or "lite" (got "${profile}")`
+    );
+  }
+  const isLite = profile === 'lite';
   const out = {
+    profile,
     fetch: { ...d.fetch, ...(cfg.fetch ?? {}) },
-    output: { ...d.output, ...(cfg.output ?? {}) },
+    output: { ...d.output, ...liteOutputDefaults(isLite), ...(cfg.output ?? {}) },
+    lite: { ...d.lite, ...(cfg.lite ?? {}) },
     filter: {
       ...d.filter,
       ...(cfg.filter ?? {}),
@@ -85,6 +126,10 @@ function mergeWithDefaults(cfg) {
       url: String(l.url),
       enabled: l.enabled ?? true,
       hosts: l.hosts ?? false,
+      // Priority used by the lite profile when trimming to the network-rule
+      // budget: higher-priority sources keep their rules first. 1 = pruned
+      // first, 5 = never pruned unless the budget forces it.
+      priority: Number(l.priority ?? 3),
     };
   });
   // provided_lists are additional lists the user has enabled in uBO; each is
@@ -130,6 +175,13 @@ export function loadConfig(path = 'lists.json') {
 
 export default function configFromCli(cli) {
   const cfg = loadConfig(cli.config);
+  if (cli.profile) cfg.profile = cli.profile;
+  // `--profile lite` without `-o` uses the lite output identity even when the
+  // user's lists.json carries the classic output.section — a CLI profile switch
+  // implies the lite build, and the output must not accidentally stay classic.
+  if (cli.profile === 'lite' && cli.output === null) {
+    Object.assign(cfg.output, liteOutputDefaults(true));
+  }
   if (cli.output) cfg.output.file = cli.output;
   if (cli.resolve) {
     for (const key of Object.keys(cfg.fetch)) {

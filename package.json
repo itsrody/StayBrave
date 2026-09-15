@@ -13,7 +13,9 @@
   "scripts": {
     "start": "node src/main.js",
     "build": "node src/main.js",
+    "build:lite": "node src/main.js --profile lite",
     "verify": "node examples/verify.js",
+    "verify:lite": "node examples/verify-lite.js",
     "test": "node --test test/*.test.js"
   },
   "engines": {

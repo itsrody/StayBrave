@@ -11,7 +11,7 @@ import {
 } from './ubo.js';
 import { transformCosmetic } from './cosmetic.js';
 import { normalizeHostsLine, normalizeLine } from './normalize.js';
-import { expandConditionals } from './preprocess.js';
+import { expandConditionals, FIREFOX_ENV } from './preprocess.js';
 
 // The trusted flag is a parser-mode, not a per-line property: with
 // `trustedSource: false` (the shipped default) trusted-syntax rules carry
@@ -53,14 +53,14 @@ function isHostScopeHost(host) {
 // shared across all sources by the pipeline — uBO itself reuses one parser
 // instance over its whole asset set: `parse()` rewinds the node pool and
 // zeroes every node field, so no state leaks between lines).
-export function analyzeText(text, filter, isHosts, parser) {
+export function analyzeText(text, filter, isHosts, parser, env = FIREFOX_ENV) {
   const stats = emptyStats();
   if (parser === undefined) {
     parser = makeParser({ keep_trusted_only: filter.keep_trusted_only });
   }
   const lines = [];
 
-  const expanded = expandConditionals(text);
+  const expanded = expandConditionals(text, env);
   for (const raw0 of expanded.split('\n')) {
     stats.total_lines += 1;
     const trimmed = raw0.trim();

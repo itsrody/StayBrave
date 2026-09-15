@@ -52,6 +52,13 @@ export const FIREFOX_ENV = new Set([
   'ipaddress',
 ]);
 
+// Environment value set of a uBO Lite (MV3) Chromium install. `mv3` is the
+// token uAssets uses to gate MV3-only filters; `chromium`/`ubol` mirror the
+// uBO Lite build family. Firefox/legacy/safari capability tokens
+// (`firefox`, `html_filtering`, `user_stylesheet`, `ipaddress`) are all false
+// here, so `!#if env_firefox` / `!#if cap_html_filtering` branches are dropped.
+export const MV3_ENV = new Set(['ublock', 'ubol', 'chromium', 'mv3']);
+
 export function tokenTruth(exprToken, env = FIREFOX_ENV) {
   let not = false;
   let token = exprToken;

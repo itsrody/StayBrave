@@ -19,6 +19,7 @@ export function timestamp(now = new Date()) {
 
 export function writeOutput(path, outputCfg, optimized, summaries) {
   const now = new Date();
+  const isLite = optimized.profile === 'lite';
   const chunks = [];
   chunks.push('[Adblock Plus 2.0]');
   chunks.push(`! Title: ${outputCfg.title}`);
@@ -110,39 +111,67 @@ export function writeOutput(path, outputCfg, optimized, summaries) {
     `! Cosmetic channels: ${optimized.simple_class_id} simple class/id, ${optimized.complex_token_led} complex token-led, ${optimized.generic_misc} generic-misc, ${optimized.hostname_hide} hostname-hide, ${optimized.hostname_unhide} hostname-unhide, ${optimized.procedural} procedural`
   );
   chunks.push('!');
-  chunks.push('! Built for Firefox uBO, where the exclusive capabilities live:');
-  chunks.push(
-    `!   ... CNAME uncloaking + $ipaddress= rules, ##^ HTML filters, ^responseheader filters, scriptlets`
-  );
-  const fe = optimized.firefox_exclusive ?? {};
-  chunks.push(
-    `! Firefox-exclusive rules shipped: ${fe.html_filters ?? 0} html_filters, ${fe.responseheaders ?? 0} responseheaders, ${fe.scriptlets ?? 0} scriptlets, ${fe.ipaddress ?? 0} ipaddress, ${fe.cname ?? 0} cname, ${fe.csp ?? 0} csp` +
-      (fe.replace > 0 || fe.uritransform > 0 || fe.urlskip > 0
-        ? ` | trusted-only: ${fe.replace ?? 0} replace, ${fe.uritransform ?? 0} uritransform, ${fe.urlskip ?? 0} urlskip`
-        : '')
-  );
-  chunks.push('! Every rule below is validated by the uBlock Origin 1.74+ static-filter parser.');
-  chunks.push(
-    '! Unsupported uBO scriptlet injections, trusted-only ($replace=, $uritransform, $urlskip,'
-  );
-  chunks.push(
-    '! trusted-* scriptlets) and dead syntax are removed unless keep_trusted_only is enabled;'
-  );
-  chunks.push(
-    '! when enabled, add this list\'s URL to uBO\'s trustedListPrefixes advanced setting.'
-  );
-  chunks.push(
-    '! Procedural cosmetic rules are rewritten into forms Firefox uBO executes'
-  );
-  chunks.push(
-    '! (:contains -> :has-text, :nth-ancestor -> :upward, redundant :style stripped).'
-  );
-  chunks.push(
-    '! Redundant network rules are subsumed by broader host/path rules;'
-  );
-  chunks.push(
-    '! $badfilter pairs are stripped; $popup rules are preserved (uBO-native).'
-  );
+  if (isLite) {
+    const ls = optimized.lite_stats ?? {};
+    const budget = optimized.budget ?? null;
+    const dropped = (ls.total ?? 0) - (optimized.input_rules ?? 0);
+    chunks.push('! Built for uBO Lite (MV3 / declarativeNetRequest):');
+    chunks.push(
+      `!   MV3-incompatible rules removed: ${dropped} (scriptlets ${ls.scriptlets ?? 0}, html_filters ${ls.html_filters ?? 0}, responseheaders ${ls.responseheaders ?? 0}, strong_cosmetic ${ls.strong_cosmetic ?? 0}, procedural_cosmetic ${ls.procedural_cosmetic ?? 0}, regex_network ${ls.regex_network ?? 0}, entity_domain ${ls.entity_domain ?? 0}, unsupported_modifiers ${ls.unsupported_modifiers ?? 0})`
+    );
+    if (budget !== null) {
+      const dp = Object.entries(budget.dropped_by_priority ?? {})
+        .sort((a, b) => Number(b[0]) - Number(a[0]))
+        .map(([p, n]) => `p${p}:${n}`)
+        .join(', ');
+      chunks.push(
+        `! Network-rule budget: ${budget.network}/${budget.budget} shipped (${budget.exceptions} exceptions reserved, ${budget.dropped} pruned by source priority${dp ? `; ${dp}` : ''})`
+      );
+    }
+    chunks.push(
+      '! Only CSS-hideable cosmetics (plain selectors, :has(), :not()) and'
+    );
+    chunks.push(
+      '! DNR-convertible network rules ship; no scriptlets, procedural cosmetics,'
+    );
+    chunks.push(
+      '! entity-wildcard $domain= rules, HTML/response-header filters or regex rules.'
+    );
+  } else {
+    chunks.push('! Built for Firefox uBO, where the exclusive capabilities live:');
+    chunks.push(
+      `!   ... CNAME uncloaking + $ipaddress= rules, ##^ HTML filters, ^responseheader filters, scriptlets`
+    );
+    const fe = optimized.firefox_exclusive ?? {};
+    chunks.push(
+      `! Firefox-exclusive rules shipped: ${fe.html_filters ?? 0} html_filters, ${fe.responseheaders ?? 0} responseheaders, ${fe.scriptlets ?? 0} scriptlets, ${fe.ipaddress ?? 0} ipaddress, ${fe.cname ?? 0} cname, ${fe.csp ?? 0} csp` +
+        (fe.replace > 0 || fe.uritransform > 0 || fe.urlskip > 0
+          ? ` | trusted-only: ${fe.replace ?? 0} replace, ${fe.uritransform ?? 0} uritransform, ${fe.urlskip ?? 0} urlskip`
+          : '')
+    );
+    chunks.push('! Every rule below is validated by the uBlock Origin 1.74+ static-filter parser.');
+    chunks.push(
+      '! Unsupported uBO scriptlet injections, trusted-only ($replace=, $uritransform, $urlskip,'
+    );
+    chunks.push(
+      '! trusted-* scriptlets) and dead syntax are removed unless keep_trusted_only is enabled;'
+    );
+    chunks.push(
+      '! when enabled, add this list\'s URL to uBO\'s trustedListPrefixes advanced setting.'
+    );
+    chunks.push(
+      '! Procedural cosmetic rules are rewritten into forms Firefox uBO executes'
+    );
+    chunks.push(
+      '! (:contains -> :has-text, :nth-ancestor -> :upward, redundant :style stripped).'
+    );
+    chunks.push(
+      '! Redundant network rules are subsumed by broader host/path rules;'
+    );
+    chunks.push(
+      '! $badfilter pairs are stripped; $popup rules are preserved (uBO-native).'
+    );
+  }
   chunks.push('');
 
   for (const rule of optimized.rules) {

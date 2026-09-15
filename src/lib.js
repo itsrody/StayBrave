@@ -10,6 +10,10 @@ import { detectDroppedCosmetics, certifyCosmeticDeadHides, certifyDeadCosmeticEx
 import { groupCosmeticSelectors } from './cosmetic.js';
 import { subtractProvided } from './provided.js';
 import { writeOutput } from './writer.js';
+import { MV3_ENV, FIREFOX_ENV } from './preprocess.js';
+import { stripLite } from './lite.js';
+import { trimToBudget } from './budget.js';
+import { canonicalizeNetOptions } from './rewrite.js';
 
 // Collect the active rule lines of an already-enabled external list (uBO
 // built-ins, EasyList-in-browser, …): expand !#include, drop comments/headers,
@@ -29,9 +33,20 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
   const fetcher = new Fetcher({ ...config.fetch, offline });
   const fetched = await fetcher.fetchAll(config.lists);
 
+  // The profile picks the browser-family environment the `!#if` preprocessor
+  // evaluates against: desktop Firefox uBO (classic) vs uBO Lite MV3.
+  const isLite = config.profile === 'lite';
+  const env = isLite ? MV3_ENV : FIREFOX_ENV;
+
   const summaries = [];
   const allRules = [];
   let sourcesOk = 0;
+
+  // Rule-string -> source priority, used only by the lite budget pass. Keyed
+  // by the canonicalized spelling so it still matches after optimize()'s
+  // canonicalizeRules pass (a no-op for rules it does not change).
+  let rulePriority = null;
+  if (isLite) rulePriority = new Map();
 
   // One parser for the whole run, mirroring uBO's own single-instance reuse:
   // constructor cost is paid once and per-line `parse()` is fully
@@ -58,11 +73,31 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
       result.text,
       config.filter,
       source.hosts,
-      parser
+      parser,
+      env
     );
     Object.assign(summary, stats);
     summaries.push(summary);
-    for (const line of lines) allRules.push(line);
+    for (const line of lines) {
+      allRules.push(line);
+      if (rulePriority !== null) {
+        const key =
+          config.filter.rewrite_canonical_options !== false ? canonicalizeNetOptions(line) : line;
+        const cur = rulePriority.get(key) ?? 0;
+        if (source.priority > cur) rulePriority.set(key, source.priority);
+      }
+    }
+  }
+
+  // MV3 compatibility filtering: before any subsumption so a dropped rule can
+  // never act as a cover. Only the lite profile strips (the classic output
+  // deliberately keeps scriptlets/procedural/regex for Firefox uBO).
+  let liteStats = null;
+  if (isLite) {
+    const stripped = stripLite(allRules);
+    liteStats = stripped.stats;
+    allRules.length = 0;
+    for (const l of stripped.lines) allRules.push(l);
   }
 
   const optimized = optimize(allRules, config.filter);
@@ -215,6 +250,20 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
     optimized.provided_cosmetic_covered = 0;
   }
 
+  // Budget pass (lite profile only): cap the shipped network rules so uBO
+  // Lite's runtime DNR compilation stays inside its dynamic rule budget.
+  // Purely a reported coverage reduction — it runs after the engine-certified
+  // gates and the coverage recheck, which still prove the subsumption removals.
+  optimized.budget = null;
+  if (isLite) {
+    const budget = trimToBudget(optimized.rules, {
+      budget: config.lite.network_budget,
+      priorityOf: (l) => rulePriority?.get(l) ?? 3,
+    });
+    optimized.rules = budget.rules;
+    optimized.budget = budget;
+  }
+
   // Last organizing pass: repack each host's pure-CSS cosmetic rules into
   // single comma-separated lines (uBO delivers those as one native CSS rule, so
   // no delivery behaviour changes — duplicated prefixes are the only byte that
@@ -231,6 +280,8 @@ export async function runPipeline(config, { offline = false, outputPath } = {}) 
   // Recompute token buckets / channels / efficiency / exclusives against the
   // final rule set so every printed number describes the shipped list.
   refreshDiagnostics(optimized);
+  optimized.profile = config.profile;
+  optimized.lite_stats = liteStats;
 
   const outPath = outputPath ?? config.output.file;
   writeOutput(outPath, config.output, optimized, summaries);

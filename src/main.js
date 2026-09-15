@@ -7,21 +7,25 @@ import { runPipeline } from './lib.js';
 function usage() {
   console.error(
     [
-      'Usage: staybrave [--config <path>] [--output <path>] [--offline]',
+      'Usage: staybrave [--config <path>] [--output <path>] [--profile <name>] [--offline]',
       '',
       'Fetch, analyze, and optimize uBlock Origin filter lists into a single',
-      'sorted StayBrave-Classic.txt validated by uBO\'s own filter parser.',
+      'sorted filter list validated by uBO\'s own filter parser.',
       '',
       'Options:',
-      '  -c, --config <path>   config file (default: lists.json)',
-      '  -o, --output <path>   output file (default: output/StayBrave-Classic.txt)',
-      '  --offline             never touch the network; use .cache only',
+      '  -c, --config <path>     config file (default: lists.json)',
+      '  -o, --output <path>     output file (default per profile:',
+      '                          classic -> output/StayBrave-Classic.txt,',
+      '                          lite -> output/StayBraveLite.txt)',
+      '  -p, --profile <name>    classic (Firefox uBO 1.74+, default) or',
+      '                          lite (uBO Lite / MV3, DNR-budgeted)',
+      '  --offline               never touch the network; use .cache only',
     ].join('\n')
   );
 }
 
 function parseArgs(argv) {
-  const cli = { config: 'lists.json', output: null, offline: false, resolve: false };
+  const cli = { config: 'lists.json', output: null, profile: null, offline: false, resolve: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     switch (arg) {
@@ -33,6 +37,10 @@ function parseArgs(argv) {
       case '-o':
       case '--output':
         cli.output = resolve(process.cwd(), argv[++i]);
+        break;
+      case '-p':
+      case '--profile':
+        cli.profile = argv[++i];
         break;
       case '--offline':
         cli.offline = true;
@@ -141,6 +149,22 @@ try {
         ? ` | trusted-only: ${fmt(fe.replace ?? 0)} replace, ${fmt(fe.uritransform ?? 0)} uritransform, ${fmt(fe.urlskip ?? 0)} urlskip`
         : '')
   );
+  if (config.profile === 'lite') {
+    const ls = o.lite_stats ?? {};
+    const budget = o.budget ?? null;
+    console.log(
+      `MV3 compatibility: removed ${fmt((ls.total ?? 0) - (o.input_rules ?? 0))} rule(s) (scriptlets ${fmt(ls.scriptlets ?? 0)}, html ${fmt(ls.html_filters ?? 0)}, responseheaders ${fmt(ls.responseheaders ?? 0)}, strong ${fmt(ls.strong_cosmetic ?? 0)}, procedural ${fmt(ls.procedural_cosmetic ?? 0)}, regex ${fmt(ls.regex_network ?? 0)}, entity-domains ${fmt(ls.entity_domain ?? 0)}, modifiers ${fmt(ls.unsupported_modifiers ?? 0)})`
+    );
+    if (budget !== null) {
+      const dp = Object.entries(budget.dropped_by_priority ?? {})
+        .sort((a, b) => Number(b[0]) - Number(a[0]))
+        .map(([p, n]) => `p${p}:${fmt(n)}`)
+        .join(', ');
+      console.log(
+        `network budget: ${fmt(budget.network)}/${fmt(budget.budget)} rules shipped (${fmt(budget.exceptions)} exceptions kept, ${fmt(budget.dropped)} pruned by priority${dp ? `; ${dp}` : ''})`
+      );
+    }
+  }
   if (result.engineRecheck !== null && result.engineRecheck !== undefined) {
     const r = result.engineRecheck;
     console.log(

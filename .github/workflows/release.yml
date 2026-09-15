@@ -1,4 +1,4 @@
-name: Publish StayBrave-Classic.txt
+name: Publish StayBrave filter lists
 
 "on":
   schedule:
@@ -9,14 +9,14 @@ name: Publish StayBrave-Classic.txt
       branch:
         description: Branch to check out, build, and publish to
         required: false
-        default: classic
+        default: lite
       run_tests:
         description: Run unit tests before compiling
         type: boolean
         default: true
 
 concurrency:
-  group: publish-${{ inputs.branch || 'classic' }}
+  group: publish-${{ inputs.branch || 'lite' }}
   # Only the newest build matters; cancel any queued run so it cannot race
   # the commit/push step.
   cancel-in-progress: true
@@ -26,13 +26,13 @@ permissions:
 
 jobs:
   build-and-publish:
-    name: Generate and publish StayBrave-Classic.txt
+    name: Generate and publish StayBrave filter lists
     runs-on: ubuntu-latest
     steps:
       - name: Resolve target branch
         id: branch
         run: |
-          BRANCH="${{ inputs.branch || 'classic' }}"
+          BRANCH="${{ inputs.branch || 'lite' }}"
           case "$BRANCH" in
             *[!A-Za-z0-9_/.-]* ) echo "invalid branch: $BRANCH"; exit 1 ;;
           esac
@@ -71,6 +71,12 @@ jobs:
           # StaticNetFilteringEngine with zero dropped lines, and a sample of
           # simple option-less rules must still block synthetic requests.
           node examples/verify.js output/StayBrave-Classic.txt
+          # Lite profile: the MV3 build must fit its DNR budget, carry no rule
+          # uBO Lite could not compile (scriptlets, procedural cosmetics,
+          # regex/entity-domain rules), and pass the same engine gates.
+          node src/main.js --profile lite
+          node examples/verify-lite.js
+          test -s output/StayBraveLite.txt
 
       - name: Commit and push when rules changed
         run: |
@@ -78,15 +84,20 @@ jobs:
           # Only publish when the rule content changed; the timestamped header
           # (Version / Last modified) alone does not warrant a commit, so
           # upstream churn that leaves the rules identical produces no-op runs.
-          git show "HEAD:output/StayBrave-Classic.txt" 2>/dev/null \
-            | grep -v -E '^[![]' > /tmp/rules_old.txt || true
-          grep -v -E '^[![]' output/StayBrave-Classic.txt > /tmp/rules_new.txt
-          if cmp -s /tmp/rules_old.txt /tmp/rules_new.txt; then
-            echo "rules unchanged ($(wc -l < /tmp/rules_new.txt) rules); nothing to publish"
+          for F in StayBrave-Classic StayBraveLite; do
+            git show "HEAD:output/$F.txt" 2>/dev/null \
+              | grep -v -E '^[![]' > "/tmp/rules_old_$F.txt" || true
+            grep -v -E '^[![]' "output/$F.txt" > "/tmp/rules_new_$F.txt"
+          done
+          if cmp -s /tmp/rules_old_StayBrave-Classic.txt /tmp/rules_new_StayBrave-Classic.txt \
+            && cmp -s /tmp/rules_old_StayBraveLite.txt /tmp/rules_new_StayBraveLite.txt; then
+            echo "rules unchanged ($(wc -l < /tmp/rules_new_StayBrave-Classic.txt) classic / $(wc -l < /tmp/rules_new_StayBraveLite.txt) lite); nothing to publish"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add output/StayBrave-Classic.txt
-          git commit -m "Update StayBrave-Classic.txt ($(wc -l < /tmp/rules_new.txt) rules, $(date -u +'%Y-%m-%d %H:%M UTC'))"
+          git add output/StayBrave-Classic.txt output/StayBraveLite.txt
+          C=$(wc -l < /tmp/rules_new_StayBrave-Classic.txt)
+          L=$(wc -l < /tmp/rules_new_StayBraveLite.txt)
+          git commit -m "Update filter lists (classic $C rules, lite $L rules, $(date -u +'%Y-%m-%d %H:%M UTC'))"
           git push origin "HEAD:$BRANCH"

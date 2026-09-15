@@ -21,6 +21,63 @@ The list deliberately excludes the lists uBO ships built-in (uAssets) and drops
 every syntax uBO/Firefox cannot run, so the merged list is pure incremental
 weight on top of uBO's defaults.
 
+--- 
+
+## StayBrave Lite (uBO Lite / MV3 profile)
+
+The same pipeline produces a second artifact, `output/StayBraveLite.txt`, for
+**uBO Lite (Chromium)**:
+
+```sh
+node src/main.js --profile lite          # → output/StayBraveLite.txt
+node examples/verify-lite.js              # independent gate on the lite output
+```
+
+The `lite` profile swaps one parameter and adds two passes:
+
+- **Profile** (`config.profile`, CLI `-p/--profile`) — selects the
+  preprocessor token environment: `MV3_ENV` (`ublock`, `ubol`, `chromium`,
+  `mv3` true; `firefox`, `html_filtering`, `user_stylesheet`, `ipaddress`…
+  false) instead of `FIREFOX_ENV`. `!#if`/`!#else` branch bodies are
+  evaluated against it, so MV3-only branches survive and Firefox-only branches
+  are dropped before analysis. `src/preprocess.js`.
+- **MV3 compatibility filter** (`src/lite.js`, `stripLite`) — runs on the
+  merged rules *before* any subsumption so a dropped rule can never act as a
+  cover. Drops the rule classes uBO Lite cannot execute at runtime:
+  scriptlets (`##+js`), HTML filters (`##^`), response-header filters
+  (`^responseheader`), strong cosmetics (`#?#`), procedural cosmetics
+  (`:has-text(`, `:matches-*`, `:style(`, `:contains(`, …), regex network
+  rules, entity-wildcard `$domain=….*` rules (uBO Lite would silently drop
+  them — the whole rule goes), and the modifiers no runtime rule can carry
+  (`strict1p`, `strict3p`, `ipaddress`, `cname`, `popup`, `replace`,
+  `uritransform`, `urlskip`, `redirect-rule`, `genericblock`, `generichide`,
+  `elemhide`, `specifichide`, `uhide`, `shide`, `extsets`, plus `redirect=`
+  to `click2load` and regex `removeparam` values). What survives is exactly
+  what uBO Lite compiles into dynamic DNR rules and domain-scoped CSS content
+  scripts.
+- **Budget trim** (`src/budget.js`, `trimToBudget`) — caps the shipped
+  *network* rules (blocking **and** exceptions — both consume uBO Lite's
+  dynamic DNR rule budget) at `config.lite.network_budget` (default **25 000**,
+  under Chromium's 30 000-per-extension guarantee). Cosmetic rules never count
+  (they ship as CSS, not DNR). Exceptions are always reserved — dropping an
+  exception would broaden blocking, which the pipeline forbids. Blocking rules
+  are pruned by source priority (`lists.json` list `priority`, default `3`);
+  within one priority band, domain-anchored `||host^` rules survive before bare
+  request-substring patterns, so a limited slot budget buys full-host coverage.
+  The pass runs *after* the engine-certified subsumption gates and the coverage
+  recheck — those still prove the subsumption removals, so the budget pass is
+  a deliberate, reported coverage reduction, not a hidden inference.
+
+The lite output header and CLI summary report what was dropped per category and
+the budget accounting (`MV3 compatibility:` and `network budget:` lines).
+Adding `priority` to a `lists` entry in `lists.json` (1 = pruned first, 5 =
+kept longest) lets the budget favour the sources that matter to you.
+
+Whether the pipeline keeps a rule is decided per profile: `--profile lite` also
+strips rules before `optimize()`, so lite never ships a scriptlet that a
+classic cover-subsumption would otherwise have carried, and the classic profile
+never runs the budget trim.
+
 ---
 
 ## Why Node.js?
@@ -103,7 +160,8 @@ npm run verify  # node examples/verify.js — independent gate on the output
 ## Usage
 
 ```sh
-node src/main.js                          # lists.json → output/StayBrave-Classic.txt
+node src/main.js                          # lists.json → output/StayBrave-Classic.txt (classic profile)
+node src/main.js --profile lite           # lists.json → output/StayBraveLite.txt (lite profile)
 node src/main.js --config lists.json      # explicit config path
 node src/main.js -o /tmp/out.txt          # override output path
 node src/main.js --offline                # never touch the network; .cache only
@@ -113,7 +171,8 @@ node src/main.js --help
 | Flag | Default | Description |
 | --- | --- | --- |
 | `-c, --config` | `lists.json` | Path to the JSON config describing the lists to fetch. |
-| `-o, --output` | `output/StayBrave-Classic.txt` (from config) | Output file path. |
+| `-o, --output` | per profile (from config) | Output file path. |
+| `-p, --profile` | `classic` | `classic` (Firefox uBO 1.74+) or `lite` (uBO Lite / MV3, DNR-budgeted). `--profile lite` without `-o` writes `output/StayBraveLite.txt`. |
 | `--offline` | off | Serve everything from `.cache`; fail on any cache miss. |
 
 ---
@@ -686,8 +745,10 @@ defaults; the GitHub workflow runs it with the concrete output path.
   the browser will flag those rules invalid at load. Exception rules
   (`#@#+js`, `@@`) are exempt from the trust requirement and always kept.
 
-Browser target is Firefox uBO 1.74+; a Chromium variant would swap the
-preprocessor environment tokens and re-run Verify's request-type matrix.
+Browser target is Firefox uBO 1.74+ for the classic profile; the `lite` profile
+is the Chromium/uBO-Lite variant (MV3 preprocessor environment, compatibility
+filter, and the DNR budget pass). Each profile re-runs its own Verify gate
+against its own output.
 
 ---
 
